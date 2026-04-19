@@ -596,14 +596,12 @@ class PlanService:
         )
 
     def _collect_memory_refs(self, goal_text: str) -> list[str]:
-        direct_hits = self.memory_service.search(goal_text, top_k=5)
-        memory_refs = [row["summary"] for row in direct_hits if row.get("summary")]
-
-        if not memory_refs:
-            recent = self.memory_service.recent(limit=3)
-            memory_refs = [row["summary"] for row in recent if row.get("summary")]
-
-        return memory_refs or ["No related memory found. Planned from current goal only."]
+        return self.memory_service.build_memory_refs(
+            query=goal_text,
+            top_k=6,
+            fallback_recent=3,
+            types=("goal", "plan", "review", "dialogue", "profile"),
+        )
 
     def _collect_fixed_schedule_refs(self, target_date: date) -> list[str]:
         items = self.schedule_service.list_effective_fixed_schedules_for_day(target_date)

@@ -1,12 +1,13 @@
 import json
 import re
-from datetime import date
+from datetime import date, datetime
 from typing import Any
 
 from ..db import get_connection, now_iso
 
 
 class MemoryService:
+    _NO_MEMORY_FALLBACK = "No related memory found. Planned from current goal only."
     _CATEGORY_KEYWORDS: dict[str, tuple[str, ...]] = {
         "goal": ("目标", "计划", "打算", "想要", "goal", "plan"),
         "task_progress": ("进展", "完成", "已做", "正在", "推进", "progress", "done"),
@@ -41,33 +42,90 @@ class MemoryService:
             conn.commit()
             return int(cursor.lastrowid)
 
-    def search(self, query: str, top_k: int = 5) -> list[dict]:
-        like = f"%{query.strip()}%"
-        with get_connection() as conn:
-            rows = conn.execute(
-                """
-                SELECT id, date, type, summary, created_at
-                FROM memories
-                WHERE summary LIKE ? OR content LIKE ?
-                ORDER BY id DESC
-                LIMIT ?
-                """,
-                (like, like, top_k),
-            ).fetchall()
-        return [dict(r) for r in rows]
+    def search(
+        self,
+        query: str,
+        top_k: int = 5,
+        *,
+        types: tuple[str, ...] | None = None,
+    ) -> list[dict[str, Any]]:
+        normalized_query = str(query or "").strip()
+        if not normalized_query:
+            return self.recent(limit=top_k, types=types)
 
-    def recent(self, limit: int = 5) -> list[dict]:
+        query_terms = self._extract_query_terms(normalized_query)
+        rows = self._fetch_search_candidates(
+            query=normalized_query,
+            query_terms=query_terms,
+            types=types,
+            limit=max(top_k * 5, 24),
+        )
+        if not rows:
+            return []
+
+        scored = []
+        for row in rows:
+            score = self._score_row(row=row, query=normalized_query, query_terms=query_terms)
+            if score <= 0:
+                continue
+            scored.append((score, row))
+
+        if not scored:
+            return []
+
+        scored.sort(
+            key=lambda item: (
+                item[0],
+                str(item[1].get("date") or ""),
+                str(item[1].get("created_at") or ""),
+                int(item[1].get("id") or 0),
+            ),
+            reverse=True,
+        )
+        return [self._strip_content(dict(row)) for _, row in scored[:top_k]]
+
+    def recent(
+        self,
+        limit: int = 5,
+        *,
+        types: tuple[str, ...] | None = None,
+    ) -> list[dict[str, Any]]:
+        base_sql = """
+            SELECT id, date, type, summary, content, created_at
+            FROM memories
+        """
+        params: list[Any] = []
+        if types:
+            placeholders = ", ".join("?" for _ in types)
+            base_sql += f" WHERE type IN ({placeholders})"
+            params.extend(types)
+        base_sql += " ORDER BY date DESC, created_at DESC, id DESC LIMIT ?"
+        params.append(limit)
+
         with get_connection() as conn:
-            rows = conn.execute(
-                """
-                SELECT id, date, type, summary, created_at
-                FROM memories
-                ORDER BY id DESC
-                LIMIT ?
-                """,
-                (limit,),
-            ).fetchall()
-        return [dict(r) for r in rows]
+            rows = conn.execute(base_sql, tuple(params)).fetchall()
+        return [self._strip_content(dict(r)) for r in rows]
+
+    def build_memory_refs(
+        self,
+        *,
+        query: str,
+        top_k: int = 5,
+        fallback_recent: int = 3,
+        types: tuple[str, ...] | None = None,
+    ) -> list[str]:
+        direct_hits = self.search(query=query, top_k=top_k, types=types)
+        refs = [self._format_memory_ref(row) for row in direct_hits if row.get("summary")]
+        if refs:
+            return refs
+
+        if fallback_recent > 0:
+            recent_rows = self.recent(limit=fallback_recent, types=types)
+            refs = [self._format_memory_ref(row) for row in recent_rows if row.get("summary")]
+            if refs:
+                return refs
+
+        return [self._NO_MEMORY_FALLBACK]
 
     def list_memories(
         self,
@@ -247,3 +305,169 @@ class MemoryService:
         )
         issue = structured_memory["issues"][0] if structured_memory["issues"] else "未提及问题"
         return f"目标: {goal} | 进展: {progress} | 问题: {issue}"
+
+    def _fetch_search_candidates(
+        self,
+        *,
+        query: str,
+        query_terms: list[str],
+        types: tuple[str, ...] | None,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        where_clauses: list[str] = []
+        params: list[Any] = []
+
+        if types:
+            placeholders = ", ".join("?" for _ in types)
+            where_clauses.append(f"type IN ({placeholders})")
+            params.extend(types)
+
+        search_terms = [query] + query_terms
+        if search_terms:
+            like_clauses: list[str] = []
+            for token in search_terms[:24]:
+                like_clauses.append("summary LIKE ?")
+                like_clauses.append("content LIKE ?")
+                like = f"%{token}%"
+                params.extend([like, like])
+            where_clauses.append(f"({' OR '.join(like_clauses)})")
+
+        sql = """
+            SELECT id, date, type, summary, content, created_at
+            FROM memories
+        """
+        if where_clauses:
+            sql += " WHERE " + " AND ".join(where_clauses)
+        sql += " ORDER BY date DESC, created_at DESC, id DESC LIMIT ?"
+        params.append(max(1, min(200, limit)))
+
+        with get_connection() as conn:
+            rows = conn.execute(sql, tuple(params)).fetchall()
+        return [dict(row) for row in rows]
+
+    def _extract_query_terms(self, query: str) -> list[str]:
+        tokens: list[str] = []
+        seen: set[str] = set()
+
+        def add_token(raw: str) -> None:
+            token = str(raw or "").strip()
+            if len(token) < 2:
+                return
+            key = token.lower()
+            if key in seen:
+                return
+            seen.add(key)
+            tokens.append(token)
+
+        for part in self._split_keywords(query):
+            add_token(part)
+            if re.search(r"[\u4e00-\u9fff]", part):
+                for han_token in self._expand_han_terms(part):
+                    add_token(han_token)
+
+        return tokens[:24]
+
+    def _split_keywords(self, text: str) -> list[str]:
+        normalized = re.sub(r"[^\w\u4e00-\u9fff]+", " ", str(text or "").strip())
+        return [part for part in normalized.split() if part]
+
+    def _expand_han_terms(self, text: str) -> list[str]:
+        chunks = re.findall(r"[\u4e00-\u9fff]{2,}", text)
+        expanded: list[str] = []
+        for chunk in chunks:
+            if len(chunk) <= 4:
+                expanded.append(chunk)
+                continue
+            # Build short n-grams to improve fuzzy retrieval for long Chinese phrases.
+            for size in (2, 3, 4):
+                for idx in range(0, len(chunk) - size + 1):
+                    expanded.append(chunk[idx : idx + size])
+                    if len(expanded) >= 18:
+                        return expanded
+        return expanded
+
+    def _score_row(
+        self,
+        *,
+        row: dict[str, Any],
+        query: str,
+        query_terms: list[str],
+    ) -> float:
+        summary = str(row.get("summary") or "").lower()
+        content = str(row.get("content") or "").lower()
+        normalized_query = query.lower()
+        score = 0.0
+
+        if normalized_query and normalized_query in summary:
+            score += 6.0
+        if normalized_query and normalized_query in content:
+            score += 4.0
+
+        for term in query_terms:
+            lower_term = term.lower()
+            if lower_term in summary:
+                score += 2.0
+            if lower_term in content:
+                score += 1.0
+
+        memory_type = str(row.get("type") or "").lower()
+        if memory_type == "goal":
+            score += 0.6
+        elif memory_type == "plan":
+            score += 0.5
+        elif memory_type == "review":
+            score += 0.4
+        elif memory_type == "dialogue":
+            score += 0.2
+
+        score += self._recency_bonus(row)
+        return score
+
+    def _recency_bonus(self, row: dict[str, Any]) -> float:
+        dt = self._parse_row_timestamp(row)
+        if dt is None:
+            return 0.0
+        days_ago = max(0.0, (datetime.now() - dt).total_seconds() / 86400)
+        if days_ago <= 1:
+            return 2.0
+        if days_ago <= 3:
+            return 1.6
+        if days_ago <= 7:
+            return 1.1
+        if days_ago <= 30:
+            return 0.6
+        return 0.2
+
+    def _parse_row_timestamp(self, row: dict[str, Any]) -> datetime | None:
+        date_text = str(row.get("date") or "").strip()
+        if date_text:
+            try:
+                return datetime.strptime(date_text, "%Y-%m-%d")
+            except ValueError:
+                pass
+
+        created_at = str(row.get("created_at") or "").strip()
+        if not created_at:
+            return None
+        try:
+            # Support "YYYY-MM-DDTHH:MM:SS" and with timezone suffix.
+            cleaned = created_at.replace("Z", "+00:00")
+            parsed = datetime.fromisoformat(cleaned)
+            if parsed.tzinfo is not None:
+                return parsed.astimezone().replace(tzinfo=None)
+            return parsed
+        except ValueError:
+            return None
+
+    def _strip_content(self, row: dict[str, Any]) -> dict[str, Any]:
+        normalized = dict(row)
+        normalized.pop("content", None)
+        return normalized
+
+    def _format_memory_ref(self, row: dict[str, Any]) -> str:
+        summary = str(row.get("summary") or "").strip()
+        if not summary:
+            return ""
+        memory_type = str(row.get("type") or "").strip() or "memory"
+        date_text = str(row.get("date") or "").strip() or str(row.get("created_at") or "").strip()[:10] or "N/A"
+        return f"[{memory_type}|{date_text}] {summary}"

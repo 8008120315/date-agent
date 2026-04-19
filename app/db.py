@@ -127,6 +127,18 @@ def init_db() -> None:
             ON chat_messages(turn_id)
             """
         )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_memories_type_date
+            ON memories(type, date, id)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_memories_created_at
+            ON memories(created_at, id)
+            """
+        )
         conn.commit()
 
 

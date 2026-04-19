@@ -463,6 +463,27 @@ def _chat_fallback_reply(message: str, err_text: str) -> tuple[str, str]:
     return f"{reply}\n\n[fallback reason] {err_text}", "rule-based"
 
 
+def _build_chat_memory_block(message: str) -> str:
+    refs = memory_service.build_memory_refs(
+        query=message,
+        top_k=6,
+        fallback_recent=3,
+        types=("goal", "plan", "review", "dialogue", "profile"),
+    )
+    return "\n".join(f"- {row}" for row in refs) if refs else "- N/A"
+
+
+def _should_capture_dialogue_memory(message: str) -> bool:
+    text = str(message or "").strip()
+    if len(text) < 8:
+        return False
+    if re.fullmatch(r"[\W_]+", text):
+        return False
+    if text.lower() in {"hi", "hello", "你好", "在吗", "谢谢", "ok"}:
+        return False
+    return True
+
+
 
 def _normalize_conversation_title(raw: str) -> str:
     text = str(raw or "").replace("\r", " ").replace("\n", " ").strip()
@@ -549,18 +570,22 @@ def chat(payload: ChatRequest) -> ChatResponse:
         content=payload.message,
     )
 
+    memory_block = _build_chat_memory_block(payload.message)
     system_prompt = (
         "You are a practical personal assistant.\n"
         "Respond in concise Simplified Chinese by default.\n"
         "Give actionable suggestions and keep formatting lightweight.\n"
         "When relevant, use the following local context:\n"
-        f"{build_local_context_block(settings)}"
+        f"{build_local_context_block(settings)}\n"
+        "Also use the provided long-term memory snippets when they are relevant."
     )
     user_prompt = (
         "[User message]\n"
         f"{payload.message}\n\n"
         "[Local context]\n"
-        f"{build_local_context_block(settings)}"
+        f"{build_local_context_block(settings)}\n\n"
+        "[Long-term memory snippets]\n"
+        f"{memory_block}"
     )
     fallback = False
     try:
@@ -581,6 +606,15 @@ def chat(payload: ChatRequest) -> ChatResponse:
         model=model_name,
         fallback=fallback,
     )
+    if _should_capture_dialogue_memory(payload.message):
+        try:
+            memory_service.ingest_dialogue_memory(
+                dialogue_text=f"用户：{payload.message.strip()}\n助手：{reply_text.strip()}",
+                memory_date=datetime.now().date(),
+            )
+        except Exception:
+            # Keep chat response stable even if memory ingest fails.
+            pass
 
     final_conversation_id = payload.conversation_id
     if is_first_turn:

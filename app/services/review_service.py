@@ -246,6 +246,15 @@ class ReviewService:
         if req.focus_text.strip():
             lines.append(f"复盘关注点：{req.focus_text.strip()}")
 
+        related_memory_refs = self._collect_related_memory_refs(
+            focus_text=req.focus_text.strip(),
+            period_label=period_label,
+        )
+        if related_memory_refs:
+            lines.append("相关长期记忆：")
+            for ref in related_memory_refs:
+                lines.append(f"- {ref}")
+
         if req.done_text.strip() or req.undone_text.strip() or req.blockers_text.strip():
             lines.append("用户补充输入：")
             if req.done_text.strip():
@@ -410,6 +419,20 @@ class ReviewService:
         if status == "partial":
             return f"部分完成({percent}%)"
         return "未完成"
+
+    def _collect_related_memory_refs(self, *, focus_text: str, period_label: str) -> list[str]:
+        query_text = focus_text or period_label
+        refs = self.memory_service.build_memory_refs(
+            query=query_text,
+            top_k=4,
+            fallback_recent=0,
+            types=("review", "plan", "goal", "dialogue"),
+        )
+        if not refs:
+            return []
+        if len(refs) == 1 and refs[0].startswith("No related memory found"):
+            return []
+        return refs
 
     def _normalize_percent(self, value: Any, *, default: int = 0) -> int:
         try:
