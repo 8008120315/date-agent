@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>复盘记录 - Date Agent MVP</title>
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body>
+    <main class="page-container">
+      <section class="card page-top">
+        <h1>复盘记录</h1>
+        <p class="hint">查看已保存的复盘内容，支持复制和快速定位到创建时间。</p>
+        <nav class="module-nav" aria-label="页面导航">
+          <a class="module-nav-link {% if active_page == 'generate' %}is-active{% endif %}" href="/plan/generate"
+            >生成任务清单</a
+          >
+          <a class="module-nav-link {% if active_page == 'daily' %}is-active{% endif %}" href="/plan/daily"
+            >每日任务清单</a
+          >
+          <a class="module-nav-link {% if active_page == 'review' %}is-active{% endif %}" href="/review">提交复盘</a>
+          <a class="module-nav-link {% if active_page == 'review_records' %}is-active{% endif %}" href="/review/records"
+            >复盘记录</a
+          >
+          <a class="module-nav-link {% if active_page == 'chat' %}is-active{% endif %}" href="/chat">AI聊天</a>
+        </nav>
+      </section>
+
+      <section class="card review-records-card">
+        <div class="review-records-toolbar">
+          <h2>已保存记录</h2>
+          <div class="review-records-actions">
+            <label class="review-search-control" for="review-search-input">
+              <span>搜索</span>
+              <input id="review-search-input" type="text" placeholder="按摘要或内容关键词搜索" />
+            </label>
+            <label class="review-date-control" for="review-start-date">
+              <span>开始日期</span>
+              <input id="review-start-date" type="date" />
+            </label>
+            <label class="review-date-control" for="review-end-date">
+              <span>结束日期</span>
+              <input id="review-end-date" type="date" />
+            </label>
+            <label class="review-limit-control" for="review-limit-select">
+              <span>显示条数</span>
+              <select id="review-limit-select">
+                <option value="20">20</option>
+                <option value="50" selected>50</option>
+                <option value="100">100</option>
+              </select>
+            </label>
+            <button id="search-review-records-btn" type="button" class="btn-secondary">查询</button>
+            <button id="reset-review-filters-btn" type="button" class="btn-secondary">重置</button>
+            <button id="refresh-review-records-btn" type="button" class="btn-secondary">刷新</button>
+          </div>
+        </div>
+        <p id="review-records-status" class="hint">正在加载复盘记录...</p>
+        <section id="review-records-list" class="review-records-list"></section>
+      </section>
+    </main>
+
+    <div id="review-edit-modal" class="modal-overlay is-hidden" role="dialog" aria-modal="true" aria-labelledby="review-edit-title">
+      <div class="modal-panel">
+        <header class="modal-header">
+          <h3 id="review-edit-title">编辑复盘</h3>
+          <button id="close-review-modal-btn" type="button" class="modal-close-btn" aria-label="关闭">✕</button>
+        </header>
+        <form id="review-edit-form" class="review-edit-form">
+          <input id="review-edit-id" type="hidden" />
+          <label>
+            摘要
+            <input id="review-edit-summary" type="text" maxlength="300" required />
+          </label>
+          <label>
+            完整复盘内容（Markdown / 文本）
+            <textarea id="review-edit-content" rows="12" required></textarea>
+          </label>
+          <div class="modal-actions">
+            <button id="cancel-review-edit-btn" type="button" class="btn-secondary">取消</button>
+            <button id="save-review-edit-btn" type="submit">保存修改</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <div id="toast-container" class="toast-container" aria-live="polite" aria-atomic="true"></div>
+
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js" defer></script>
+    <script src="/static/review_records.js" defer></script>
+  </body>
+</html>

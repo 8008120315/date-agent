@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>生成任务清单 - Date Agent MVP</title>
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body>
+    <main class="page-container">
+      <section class="card page-top">
+        <h1>每日任务管理</h1>
+        <p class="hint">不再按时间轴硬排日程，改为按日期维护任务清单。</p>
+        <nav class="module-nav" aria-label="页面导航">
+          <a class="module-nav-link {% if active_page == 'generate' %}is-active{% endif %}" href="/plan/generate"
+            >生成任务清单</a
+          >
+          <a class="module-nav-link {% if active_page == 'daily' %}is-active{% endif %}" href="/plan/daily"
+            >每日任务清单</a
+          >
+          <a class="module-nav-link {% if active_page == 'review' %}is-active{% endif %}" href="/review">提交复盘</a>
+          <a class="module-nav-link {% if active_page == 'review_records' %}is-active{% endif %}" href="/review/records"
+            >复盘记录</a
+          >
+          <a class="module-nav-link {% if active_page == 'chat' %}is-active{% endif %}" href="/chat">AI聊天</a>
+        </nav>
+      </section>
+
+      <section class="card">
+        <h2>生成任务草稿池</h2>
+        <form id="draft-plan-form" class="draft-plan-form">
+          <div class="draft-range-row">
+            <label>
+              开始日期
+              <input id="draft-start-date" name="start_date" type="date" required />
+            </label>
+            <span class="draft-range-sep">至</span>
+            <label>
+              结束日期
+              <input id="draft-end-date" name="end_date" type="date" required />
+            </label>
+          </div>
+          <label>
+            目标
+            <input id="draft-goal-text" name="goal_text" type="text" required placeholder="例如：准备 Java 后端实习面试" />
+          </label>
+          <p class="hint">AI 将根据您选择的日期跨度，生成一份总体的任务清单草稿。</p>
+          <div class="draft-form-actions">
+            <button id="draft-generate-btn" type="submit">生成任务草稿池</button>
+            <span id="draft-generate-status" class="hint"></span>
+          </div>
+        </form>
+      </section>
+
+      <section class="card draft-dispatch-card">
+        <div class="draft-dispatch-layout">
+          <section class="draft-inbox">
+            <div class="draft-section-head">
+              <h3>AI 任务生成池（Inbox）</h3>
+              <div class="draft-inbox-actions">
+                <button id="draft-toggle-select-btn" type="button" class="btn-secondary">全选</button>
+                <button id="draft-clear-btn" type="button" class="btn-text">清空剩余草稿</button>
+              </div>
+            </div>
+            <p id="draft-inbox-meta" class="hint">请先选择日期范围并生成草稿任务。</p>
+            <div id="draft-pool-list" class="draft-pool-list"></div>
+          </section>
+
+          <section class="draft-dispatch">
+            <h3>目标日程分配盘</h3>
+            <div class="draft-dispatch-scroll">
+              <label>
+                目标日期
+                <select id="draft-target-date-select"></select>
+              </label>
+              <p id="draft-date-load-status" class="hint">请选择目标日期以查看当日任务负载。</p>
+              <div id="draft-load-summary" class="draft-load-summary">该日已有任务：0 个 | 预计总耗时：0 h</div>
+              <section class="draft-existing-board">
+                <h4>该日已有正式任务</h4>
+                <div id="draft-existing-list" class="draft-existing-list"></div>
+              </section>
+            </div>
+            <div class="draft-dispatch-footer">
+              <p id="draft-selected-summary" class="hint">已选择 0 个任务</p>
+              <button id="draft-assign-btn" type="button">将勾选的 0 个任务加入该日期</button>
+            </div>
+          </section>
+        </div>
+      </section>
+    </main>
+
+    <script src="/static/generate.js"></script>
+  </body>
+</html>

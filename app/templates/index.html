@@ -1,0 +1,132 @@
+﻿<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Date Agent MVP</title>
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body>
+    <main class="container">
+      <aside class="left-panel">
+        <section class="card">
+          <h1>每日任务管理</h1>
+          <p class="hint">不再按时间轴硬排日程，改为按日期维护任务清单。</p>
+          <p class="hint"><a href="/chat">进入聊天模式</a></p>
+        </section>
+
+        <section class="card">
+          <h2>生成任务清单</h2>
+          <form id="plan-form">
+            <label>
+              起始日期
+              <input name="date" type="date" />
+            </label>
+            <label>
+              生成范围
+              <select name="plan_span">
+                <option value="day" selected>仅当天</option>
+                <option value="week">一周（7天）</option>
+                <option value="month">一个月（30天）</option>
+                <option value="custom">自定义天数</option>
+              </select>
+            </label>
+            <div id="plan-span-custom-fields" class="range-fields is-hidden">
+              <label>
+                自起始日期起天数
+                <input name="span_days" type="number" min="1" max="90" value="7" />
+              </label>
+            </div>
+            <label>
+              目标
+              <input name="goal_text" type="text" required placeholder="例如：完成论文中期报告初稿" />
+            </label>
+            <p id="plan-date-warning" class="hint is-hidden">过去日期不能生成任务，请选择今天或未来日期。</p>
+            <button type="submit">生成任务</button>
+          </form>
+          <div id="plan-result" class="plan-result">
+            <p class="hint">生成后会在这里展示每日任务清单摘要。</p>
+          </div>
+        </section>
+
+        <section class="card">
+          <h2>提交复盘</h2>
+          <form id="review-form">
+            <label>
+              总结范围
+              <select name="range_type">
+                <option value="day" selected>某一天</option>
+                <option value="last_3_days">最近三天</option>
+                <option value="last_week">上周</option>
+                <option value="custom">自定义</option>
+              </select>
+            </label>
+            <label>
+              基准日期（单日/最近三天/上周）
+              <input name="date" type="date" />
+            </label>
+            <div id="custom-range-fields" class="range-fields is-hidden">
+              <label>
+                自定义开始日期
+                <input name="start_date" type="date" />
+              </label>
+              <label>
+                自定义结束日期
+                <input name="end_date" type="date" />
+              </label>
+            </div>
+            <label>
+              本次复盘关注点（可选）
+              <textarea name="focus_text" placeholder="例如：关注 P0 任务推进质量和阻塞处理效率"></textarea>
+            </label>
+            <label>
+              已完成（可选）
+              <textarea name="done_text" placeholder="你额外补充的已完成事项"></textarea>
+            </label>
+            <label>
+              未完成（可选）
+              <textarea name="undone_text" placeholder="你额外补充的未完成事项"></textarea>
+            </label>
+            <label>
+              阻塞（可选）
+              <textarea name="blockers_text" placeholder="你额外补充的阻塞点"></textarea>
+            </label>
+            <button type="submit">生成复盘总结</button>
+          </form>
+        </section>
+
+        <section class="card">
+          <h2>接口输出</h2>
+          <pre id="output">{ "message": "等待请求..." }</pre>
+        </section>
+      </aside>
+
+      <section class="right-panel card">
+        <div class="task-board-header">
+          <div>
+            <h2>每日任务清单</h2>
+            <p class="hint">按优先级展示任务，支持总状态与子任务条目联动编辑（未完成/部分完成/已完成）。</p>
+          </div>
+          <div class="task-board-toolbar">
+            <label class="date-inline-control" for="focus-date-input">
+              <span>选择日期</span>
+              <input id="focus-date-input" type="date" />
+            </label>
+            <div class="task-board-actions">
+              <button id="refresh-plan-btn" type="button" class="btn-secondary">刷新</button>
+              <button id="prev-day-btn" type="button" class="btn-secondary">前一天</button>
+              <button id="today-btn" type="button" class="btn-secondary">今天</button>
+              <button id="next-day-btn" type="button" class="btn-secondary">后一天</button>
+            </div>
+          </div>
+        </div>
+        <section id="task-board" class="task-board">
+          <p class="hint">加载中...</p>
+        </section>
+      </section>
+    </main>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>

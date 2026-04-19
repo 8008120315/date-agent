@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>每日任务清单 - Date Agent MVP</title>
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body>
+    <main class="page-container">
+      <section class="card page-top">
+        <h1>每日任务管理</h1>
+        <p class="hint">按优先级展示任务，支持状态与子任务条目联动编辑（未完成/部分完成/已完成）。</p>
+        <nav class="module-nav" aria-label="页面导航">
+          <a class="module-nav-link {% if active_page == 'generate' %}is-active{% endif %}" href="/plan/generate"
+            >生成任务清单</a
+          >
+          <a class="module-nav-link {% if active_page == 'daily' %}is-active{% endif %}" href="/plan/daily"
+            >每日任务清单</a
+          >
+          <a class="module-nav-link {% if active_page == 'review' %}is-active{% endif %}" href="/review">提交复盘</a>
+          <a class="module-nav-link {% if active_page == 'review_records' %}is-active{% endif %}" href="/review/records"
+            >复盘记录</a
+          >
+          <a class="module-nav-link {% if active_page == 'chat' %}is-active{% endif %}" href="/chat">AI聊天</a>
+        </nav>
+      </section>
+
+      <section class="card">
+        <div class="task-board-header">
+          <div>
+            <h2>每日任务清单</h2>
+            <p class="hint">按优先级展示任务，支持状态与子任务条目联动编辑（未完成/部分完成/已完成）。</p>
+          </div>
+          <div class="task-board-toolbar">
+            <label class="date-inline-control" for="focus-date-input">
+              <span>选择日期</span>
+              <input id="focus-date-input" type="date" />
+            </label>
+            <div class="task-board-actions">
+              <button id="add-manual-task-btn" type="button">+ 手动添加任务</button>
+              <button id="refresh-plan-btn" type="button" class="btn-secondary">刷新</button>
+              <button id="prev-day-btn" type="button" class="btn-secondary">前一天</button>
+              <button id="today-btn" type="button" class="btn-secondary">今天</button>
+              <button id="next-day-btn" type="button" class="btn-secondary">后一天</button>
+            </div>
+          </div>
+        </div>
+        <section id="task-board" class="task-board">
+          <p class="hint">加载中...</p>
+        </section>
+      </section>
+
+      <section class="card">
+        <h2>接口输出</h2>
+        <pre id="output">{ "message": "等待请求..." }</pre>
+      </section>
+    </main>
+
+    <div id="split-reschedule-modal" class="modal-overlay is-hidden">
+      <div class="modal-panel split-modal-panel">
+        <header class="modal-header">
+          <h3>拆分子任务并调度</h3>
+          <button id="split-modal-close-btn" type="button" class="modal-close-btn" aria-label="关闭">×</button>
+        </header>
+        <form id="split-reschedule-form" class="review-edit-form">
+          <p class="hint">将选中的子任务移动到目标日期并自动创建拆分任务。</p>
+          <label>
+            拆分后任务标题（可选）
+            <input id="split-new-title" type="text" maxlength="200" placeholder="默认：原任务标题-拆分" />
+          </label>
+          <label>
+            目标日期
+            <input id="split-target-date" type="date" required />
+          </label>
+          <section class="split-preview">
+            <h4>选中子任务预览</h4>
+            <ul id="split-preview-list"></ul>
+          </section>
+          <div class="modal-actions">
+            <button id="split-modal-cancel-btn" type="button" class="btn-secondary">取消</button>
+            <button id="split-modal-confirm-btn" type="submit">确认移动</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>

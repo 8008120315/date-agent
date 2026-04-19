@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AI聊天 - Date Agent MVP</title>
+    <link rel="stylesheet" href="/static/chat.css" />
+  </head>
+  <body>
+    <main class="chat-layout">
+      <aside class="sidebar">
+        <div class="sidebar-header">
+          <h1>会话列表</h1>
+          <button id="new-conversation-btn" type="button">新建</button>
+        </div>
+        <div id="conversation-list" class="conversation-list"></div>
+      </aside>
+
+      <section class="chat-panel">
+        <header class="chat-header">
+          <div>
+            <h2 id="chat-title">AI聊天</h2>
+            <p id="chat-subtitle">选择或创建一个会话开始聊天。</p>
+          </div>
+          <nav class="chat-nav" aria-label="页面导航">
+            <a class="chat-nav-link {% if active_page == 'generate' %}is-active{% endif %}" href="/plan/generate"
+              >生成任务清单</a
+            >
+            <a class="chat-nav-link {% if active_page == 'daily' %}is-active{% endif %}" href="/plan/daily"
+              >每日任务清单</a
+            >
+            <a class="chat-nav-link {% if active_page == 'review' %}is-active{% endif %}" href="/review"
+              >提交复盘</a
+            >
+            <a class="chat-nav-link {% if active_page == 'review_records' %}is-active{% endif %}" href="/review/records"
+              >&#22797;&#30424;&#35760;&#24405;</a
+            >
+
+            <a class="chat-nav-link {% if active_page == 'chat' %}is-active{% endif %}" href="/chat">AI聊天</a>
+          </nav>
+        </header>
+
+        <div id="message-list" class="message-list"></div>
+
+        <form id="chat-form" class="composer">
+          <textarea
+            id="chat-input"
+            placeholder="输入消息，Enter 发送，Shift+Enter 换行。"
+            required
+          ></textarea>
+          <button id="send-btn" type="submit">发送</button>
+        </form>
+      </section>
+    </main>
+
+    <div id="conversation-menu" class="context-menu hidden" role="menu" aria-hidden="true">
+      <button id="menu-rename-btn" type="button">重命名</button>
+      <button id="menu-delete-btn" type="button" class="danger">删除</button>
+    </div>
+
+    <script src="/static/chat.js"></script>
+  </body>
+</html>

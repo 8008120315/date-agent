@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>提交复盘 - Date Agent MVP</title>
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body>
+    <main class="page-container">
+      <section class="card page-top">
+        <h1>每日任务管理</h1>
+        <p class="hint">汇总完成情况、未完成和阻塞，生成结构化复盘总结。</p>
+        <nav class="module-nav" aria-label="页面导航">
+          <a class="module-nav-link {% if active_page == 'generate' %}is-active{% endif %}" href="/plan/generate"
+            >生成任务清单</a
+          >
+          <a class="module-nav-link {% if active_page == 'daily' %}is-active{% endif %}" href="/plan/daily"
+            >每日任务清单</a
+          >
+          <a class="module-nav-link {% if active_page == 'review' %}is-active{% endif %}" href="/review">提交复盘</a>
+          <a class="module-nav-link {% if active_page == 'review_records' %}is-active{% endif %}" href="/review/records"
+            >复盘记录</a
+          >
+          <a class="module-nav-link {% if active_page == 'chat' %}is-active{% endif %}" href="/chat">AI聊天</a>
+        </nav>
+      </section>
+
+      <section class="card review-builder-card">
+        <h2>提交复盘</h2>
+        <form id="review-form" class="review-form">
+          <div class="review-query-row">
+            <label>
+              总结范围
+              <select name="range_type">
+                <option value="day" selected>某一天</option>
+                <option value="last_3_days">最近三天</option>
+                <option value="last_week">上周</option>
+                <option value="custom">自定义</option>
+              </select>
+            </label>
+            <label>
+              基准日期
+              <input name="date" type="date" />
+            </label>
+          </div>
+
+          <div id="custom-range-fields" class="review-query-row is-hidden">
+            <label>
+              自定义开始日期
+              <input name="start_date" type="date" />
+            </label>
+            <label>
+              自定义结束日期
+              <input name="end_date" type="date" />
+            </label>
+          </div>
+
+          <section class="review-auto-context">
+            <div class="review-auto-head">
+              <h3>系统关联任务数据</h3>
+              <p class="hint">范围或日期变化后自动更新：已完成、未完成、阻塞任务。</p>
+            </div>
+            <p id="review-context-status" class="hint">等待选择日期范围...</p>
+            <div class="review-context-grid">
+              <article class="review-context-panel">
+                <h4>已完成</h4>
+                <ul id="auto-done-list"></ul>
+              </article>
+              <article class="review-context-panel">
+                <h4>未完成</h4>
+                <ul id="auto-undone-list"></ul>
+              </article>
+              <article class="review-context-panel">
+                <h4>阻塞</h4>
+                <ul id="auto-blockers-list"></ul>
+              </article>
+            </div>
+          </section>
+
+          <label>
+            本次复盘关注点（核心）
+            <textarea
+              name="focus_text"
+              rows="4"
+              data-autoresize
+              placeholder="例如：关注 P0 任务推进质量和阻塞处理效率"
+            ></textarea>
+          </label>
+
+          <details class="review-extra-inputs">
+            <summary>可选补充说明（主观输入）</summary>
+            <div class="review-extra-grid">
+              <label>
+                已完成补充
+                <textarea
+                  name="done_text"
+                  rows="3"
+                  data-autoresize
+                  placeholder="补充你主观认为最有价值的完成事项"
+                ></textarea>
+              </label>
+              <label>
+                未完成补充
+                <textarea
+                  name="undone_text"
+                  rows="3"
+                  data-autoresize
+                  placeholder="补充未完成任务背后的真实原因"
+                ></textarea>
+              </label>
+              <label>
+                阻塞补充
+                <textarea
+                  name="blockers_text"
+                  rows="3"
+                  data-autoresize
+                  placeholder="补充隐性阻塞因素（沟通、资源、依赖）"
+                ></textarea>
+              </label>
+            </div>
+          </details>
+
+          <div class="review-submit-row">
+            <span id="review-submit-status" class="hint"></span>
+            <button id="review-submit-btn" type="submit">生成复盘总结</button>
+          </div>
+        </form>
+      </section>
+
+      <section class="card review-result-card">
+        <div class="review-result-head">
+          <h2>复盘结果</h2>
+          <button id="toggle-review-edit-btn" type="button" class="btn-secondary is-hidden">编辑内容</button>
+        </div>
+        <div id="review-result" class="review-result is-empty">
+          <p class="hint">生成后将在这里展示结构化复盘内容。</p>
+        </div>
+        <div id="review-editor-wrap" class="review-editor-wrap is-hidden">
+          <label class="review-editor-label" for="review-draft-editor">编辑复盘内容（Markdown / 文本）</label>
+          <textarea id="review-draft-editor" rows="14" placeholder="在这里编辑复盘草稿内容"></textarea>
+        </div>
+        <div id="review-result-actions" class="review-result-actions is-hidden">
+          <button id="copy-review-btn" type="button" class="btn-secondary">一键复制</button>
+          <button id="save-review-btn" type="button">保存复盘记录</button>
+          <button id="exit-review-edit-btn" type="button" class="btn-secondary is-hidden">退出编辑</button>
+          <button id="apply-review-edit-btn" type="button" class="is-hidden">完成编辑</button>
+        </div>
+      </section>
+    </main>
+
+    <script src="/static/review.js"></script>
+  </body>
+</html>
