@@ -19,14 +19,20 @@ class ReviewService:
     def create_review(self, req: ReviewRequest) -> ReviewResponse:
         start_date, end_date, period_label = self._resolve_period(req)
         sessions = self._list_period_sessions(start_date=start_date, end_date=end_date)
-        covered_dates = [row["date"] for row in sessions]
+        objective_data = self._resolve_objective_data(
+            req=req,
+            sessions=sessions,
+            start_date=start_date,
+            end_date=end_date,
+        )
+        covered_dates = objective_data["dates"]
 
         review_context = self._build_review_context(
             req=req,
             start_date=start_date,
             end_date=end_date,
             period_label=period_label,
-            sessions=sessions,
+            objective_data=objective_data,
         )
 
         summary, actions, source_model, fallback = self._generate_summary(
@@ -34,6 +40,8 @@ class ReviewService:
             start_date=start_date,
             end_date=end_date,
             review_context=review_context,
+            objective_data=objective_data,
+            subjective_input=self._build_subjective_input(req),
         )
 
         memory_id = 0
@@ -236,7 +244,7 @@ class ReviewService:
         start_date: date,
         end_date: date,
         period_label: str,
-        sessions: list[dict[str, Any]],
+        objective_data: dict[str, Any],
     ) -> str:
         lines: list[str] = []
         lines.append(f"复盘范围：{period_label}")
@@ -264,39 +272,10 @@ class ReviewService:
             if req.blockers_text.strip():
                 lines.append(f"- 阻塞：{req.blockers_text.strip()}")
 
-        if not sessions:
-            lines.append("区间内暂无已保存任务清单记录。")
-            return "\n".join(lines)
-
-        lines.append("任务完成情况：")
-        for day in sessions:
-            day_date = day["date"]
-            goal_text = day["goal_text"] or "（未填写目标）"
-            lines.append(f"\n[{day_date}] 目标：{goal_text}")
-
-            plan_items = day["plan_items"]
-            if not plan_items:
-                lines.append("- 当日暂无任务项")
-            else:
-                for idx, item in enumerate(plan_items, start=1):
-                    status_label = self._status_label(item["status"], item["percent"])
-                    lines.append(
-                        f"- 任务{idx} [{item['priority']}] {item['title']} | 状态：{status_label}"
-                    )
-                    if item["note"]:
-                        lines.append(f"  备注：{item['note']}")
-                    checklist = item["checklist"]
-                    if checklist:
-                        checklist_line = "；".join(
-                            f"{'[x]' if sub['is_done'] else '[ ]'} {sub['content']}" for sub in checklist
-                        )
-                        lines.append(f"  子清单：{checklist_line}")
-
-            if day["review_text"]:
-                lines.append(f"- 已有复盘原文：{day['review_text']}")
-            if day["summary_text"]:
-                lines.append(f"- 已有复盘摘要：{day['summary_text']}")
-
+        lines.append("客观任务数据（用于生成复盘）：")
+        lines.append(self._format_objective_section("已完成任务", objective_data["done"]))
+        lines.append(self._format_objective_section("未完成任务", objective_data["incomplete"]))
+        lines.append(self._format_objective_section("阻塞任务", objective_data["blocked"]))
         return "\n".join(lines)
 
     def _generate_summary(
@@ -306,36 +285,48 @@ class ReviewService:
         start_date: date,
         end_date: date,
         review_context: str,
+        objective_data: dict[str, Any],
+        subjective_input: str,
     ) -> tuple[str, list[str], str, bool]:
         if not self.llm_service.is_ready():
             summary, actions = self._fallback_summary(
                 period_label=period_label,
-                review_context=review_context,
+                objective_data=objective_data,
             )
             return summary, actions, "rule-based", True
 
+        completed_json = json.dumps(objective_data["done"], ensure_ascii=False)
+        incomplete_json = json.dumps(objective_data["incomplete"], ensure_ascii=False)
+        blocked_json = json.dumps(objective_data["blocked"], ensure_ascii=False)
+        subjective_text = subjective_input or "无"
         system_prompt = (
-            "你是复盘助手。请严格返回 JSON，不要输出其他文字。\n"
-            "JSON schema:\n"
-            "{\n"
-            '  "summary": "...",\n'
-            '  "actions": ["...", "..."],\n'
-            '  "highlights": ["..."],\n'
-            '  "risks": ["..."]\n'
-            "}\n"
-            "要求：\n"
-            "1) summary 给出整体结论，150-260字；\n"
-            "2) actions 输出 3-5 条可执行下一步；\n"
-            "3) highlights/risk 各 2-4 条；\n"
-            "4) 总结必须充分引用输入中的任务完成状态、备注、子清单信息；\n"
-            "5) 使用简体中文。"
+            "# Role\n"
+            "你是一个客观、专业的个人效率教练。你需要根据用户提供的今日任务执行客观数据，以及用户的主观补充，生成一份结构化的复盘报告。\n\n"
+            "# Constraints (严格遵守)\n"
+            "1. 绝不捏造事实：如果“未完成”列表中为空，绝对不能在总结中说“有任务未完成”或编造不存在的任务。\n"
+            "2. 数据一致性：你的总结必须 100% 贴合用户提供的客观 JSON 数据。\n"
+            "3. 如果所有任务都已完成，请多给予鼓励，并分析高效率的原因；如果有未完成/阻塞，请客观分析风险并给出下一步行动建议。\n"
+            "4. 禁止引用任何未出现在 Input Data 的任务名称、状态、数量或结论。\n\n"
+            "# Output Format\n"
+            "请严格按照以下 Markdown 格式输出：\n"
+            "### 总体总结\n"
+            "...\n"
+            "### 关键亮点\n"
+            "...\n"
+            "### 主要风险\n"
+            "...\n"
+            "### 下一步行动\n"
+            "..."
         )
         user_prompt = (
-            f"复盘时间段：{period_label}\n"
-            f"起止：{start_date.isoformat()} ~ {end_date.isoformat()}\n"
-            "以下是复盘数据，请基于这些数据生成总结：\n"
-            f"{review_context}\n"
-            "请返回 JSON。"
+            f"复盘时间段：{period_label}（{start_date.isoformat()} ~ {end_date.isoformat()}）\n\n"
+            "# Input Data\n"
+            f"- 已完成任务：{completed_json}\n"
+            f"- 未完成任务：{incomplete_json}\n"
+            f"- 阻塞任务：{blocked_json}\n"
+            f"- 本次重点关注与主观补充：{subjective_text}\n\n"
+            "注意：若“主要风险”为空，请写“当前进度良好，无明显风险”。\n"
+            "请只输出 Markdown 正文，不要额外解释。"
         )
 
         try:
@@ -344,29 +335,16 @@ class ReviewService:
                 user_prompt=user_prompt,
                 history=None,
             )
-            payload = self._extract_json(raw_reply)
-            summary = str(payload.get("summary", "")).strip()
-            if not summary:
-                raise RuntimeError("summary is empty")
-
-            actions_raw = payload.get("actions", [])
-            actions = self._normalize_actions(actions_raw)
+            sections = self._extract_markdown_sections(raw_reply)
+            summary = self._compose_summary_from_sections(sections)
+            actions = self._parse_markdown_list_sections(sections.get("下一步行动", ""), limit=6)
             if not actions:
-                actions = ["围绕核心未完成项安排下一个最小可执行步骤。"]
-
-            highlights = self._normalize_actions(payload.get("highlights", []), limit=4)
-            risks = self._normalize_actions(payload.get("risks", []), limit=4)
-
-            if highlights:
-                summary = f"{summary}\n\n关键亮点：" + "；".join(highlights)
-            if risks:
-                summary = f"{summary}\n\n主要风险：" + "；".join(risks)
-
+                actions = self._default_actions_from_objective(objective_data)
             return summary, actions, model_name, False
         except Exception:
             summary, actions = self._fallback_summary(
                 period_label=period_label,
-                review_context=review_context,
+                objective_data=objective_data,
             )
             return summary, actions, "rule-based", True
 
@@ -394,23 +372,20 @@ class ReviewService:
             rows = []
         return rows[:limit]
 
-    def _fallback_summary(self, *, period_label: str, review_context: str) -> tuple[str, list[str]]:
-        lines = review_context.splitlines()
-        task_lines = [line for line in lines if line.strip().startswith("- 任务")]
-        done_count = len([line for line in task_lines if "状态：已完成" in line])
-        partial_count = len([line for line in task_lines if "状态：部分完成" in line])
-        todo_count = len([line for line in task_lines if "状态：未完成" in line])
-
+    def _fallback_summary(self, *, period_label: str, objective_data: dict[str, Any]) -> tuple[str, list[str]]:
+        done = objective_data["done"]
+        incomplete = objective_data["incomplete"]
+        blocked = objective_data["blocked"]
+        total = len(done) + len(incomplete)
         summary = (
-            f"{period_label}复盘：共梳理任务 {len(task_lines)} 项，"
-            f"已完成 {done_count} 项，部分完成 {partial_count} 项，未完成 {todo_count} 项。"
-            "建议优先收敛未完成项，并结合备注中的阻塞信息安排下一阶段动作。"
+            f"{period_label}复盘：共梳理任务 {total} 项，"
+            f"已完成 {len(done)} 项，未完成/部分完成 {len(incomplete)} 项，阻塞 {len(blocked)} 项。"
         )
-        actions = [
-            "将所有未完成任务拆成 30-90 分钟可执行步骤并安排到日程。",
-            "针对备注里出现的阻塞逐条给出解决动作和截止时间。",
-            "把高优先级任务的完成定义写成可验收结果，再开始执行。",
-        ]
+        if not incomplete and not blocked:
+            summary += "整体推进稳定，执行效率较好。"
+        else:
+            summary += "建议优先解决阻塞并收敛未完成项。"
+        actions = self._default_actions_from_objective(objective_data)
         return summary, actions
 
     def _status_label(self, status: str, percent: int) -> str:
@@ -433,6 +408,176 @@ class ReviewService:
         if len(refs) == 1 and refs[0].startswith("No related memory found"):
             return []
         return refs
+
+    def _build_subjective_input(self, req: ReviewRequest) -> str:
+        rows = []
+        if req.focus_text.strip():
+            rows.append(f"关注点：{req.focus_text.strip()}")
+        if req.done_text.strip():
+            rows.append(f"已完成补充：{req.done_text.strip()}")
+        if req.undone_text.strip():
+            rows.append(f"未完成补充：{req.undone_text.strip()}")
+        if req.blockers_text.strip():
+            rows.append(f"阻塞补充：{req.blockers_text.strip()}")
+        return "；".join(rows) if rows else "无"
+
+    def _resolve_objective_data(
+        self,
+        *,
+        req: ReviewRequest,
+        sessions: list[dict[str, Any]],
+        start_date: date,
+        end_date: date,
+    ) -> dict[str, Any]:
+        use_frontend = bool(
+            req.frontend_completed_list
+            or req.frontend_incomplete_list
+            or req.frontend_blocked_list
+            or req.frontend_dates
+        )
+        if use_frontend:
+            done = [self._normalize_objective_item(item.model_dump(), default_status="done") for item in req.frontend_completed_list]
+            incomplete = [
+                self._normalize_objective_item(item.model_dump(), default_status="todo")
+                for item in req.frontend_incomplete_list
+            ]
+            blocked = [self._normalize_objective_item(item.model_dump(), default_status="todo") for item in req.frontend_blocked_list]
+            dates = sorted({str(item).strip() for item in req.frontend_dates if str(item).strip()})
+            if not dates:
+                date_set = {row["date"] for row in [*done, *incomplete, *blocked] if row.get("date")}
+                dates = sorted(date_set) if date_set else self._enumerate_dates(start_date, end_date)
+            return {"done": done, "incomplete": incomplete, "blocked": blocked, "dates": dates}
+
+        done, incomplete, blocked = self._build_objective_from_sessions(sessions)
+        dates = [row["date"] for row in sessions if row.get("date")]
+        if not dates:
+            dates = self._enumerate_dates(start_date, end_date)
+        return {"done": done, "incomplete": incomplete, "blocked": blocked, "dates": dates}
+
+    def _build_objective_from_sessions(self, sessions: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+        done: list[dict[str, Any]] = []
+        incomplete: list[dict[str, Any]] = []
+        blocked: list[dict[str, Any]] = []
+        for day in sessions:
+            day_date = str(day.get("date") or "").strip()
+            for item in day.get("plan_items", []):
+                raw = {
+                    "date": day_date,
+                    "title": item.get("title", ""),
+                    "priority": item.get("priority", "P2"),
+                    "status": item.get("status", "todo"),
+                    "percent": item.get("percent", 0),
+                    "note": item.get("note", ""),
+                }
+                normalized = self._normalize_objective_item(raw, default_status="todo")
+                if normalized["status"] == "done":
+                    done.append(normalized)
+                else:
+                    incomplete.append(normalized)
+                if normalized["note"] and re.search(r"(阻塞|卡住|等待|依赖|延期|风险|blocked|blocker)", normalized["note"], re.IGNORECASE):
+                    blocked.append(normalized)
+        return done, incomplete, blocked
+
+    def _normalize_objective_item(self, raw: dict[str, Any], *, default_status: str) -> dict[str, Any]:
+        title = str(raw.get("title") or "").strip() or "未命名任务"
+        priority = str(raw.get("priority") or "P2").strip().upper() or "P2"
+        status = str(raw.get("status") or default_status).strip().lower()
+        if status not in {"done", "partial", "todo"}:
+            status = default_status if default_status in {"done", "partial", "todo"} else "todo"
+        percent = self._normalize_percent(raw.get("percent"), default=100 if status == "done" else 0)
+        if status == "done":
+            percent = 100
+        elif status == "todo":
+            percent = 0
+        elif percent <= 0:
+            percent = 50
+        return {
+            "date": str(raw.get("date") or "").strip(),
+            "title": title,
+            "priority": priority,
+            "status": status,
+            "percent": percent,
+            "note": str(raw.get("note") or "").strip(),
+        }
+
+    def _enumerate_dates(self, start_date: date, end_date: date) -> list[str]:
+        days = []
+        cursor = start_date
+        while cursor <= end_date and len(days) < 31:
+            days.append(cursor.isoformat())
+            cursor = cursor + timedelta(days=1)
+        return days
+
+    def _format_objective_section(self, title: str, rows: list[dict[str, Any]]) -> str:
+        lines = [f"{title}："]
+        if not rows:
+            lines.append("- 无")
+            return "\n".join(lines)
+        for idx, row in enumerate(rows, start=1):
+            status_label = self._status_label(row["status"], row["percent"])
+            prefix = f"[{row['date']}] " if row.get("date") else ""
+            lines.append(f"- {idx}. {prefix}[{row['priority']}] {row['title']} | 状态：{status_label}")
+            if row.get("note"):
+                lines.append(f"  备注：{row['note']}")
+        return "\n".join(lines)
+
+    def _extract_markdown_sections(self, text: str) -> dict[str, str]:
+        cleaned = str(text or "").strip()
+        sections: dict[str, str] = {}
+        pattern = re.compile(
+            r"###\s*(总体总结|关键亮点|主要风险|下一步行动)\s*\n([\s\S]*?)(?=\n###\s*(?:总体总结|关键亮点|主要风险|下一步行动)\s*\n|$)"
+        )
+        for match in pattern.finditer(cleaned):
+            key = match.group(1).strip()
+            value = match.group(2).strip()
+            sections[key] = value
+        return sections
+
+    def _parse_markdown_list_sections(self, text: str, *, limit: int = 6) -> list[str]:
+        rows: list[str] = []
+        for raw in str(text or "").splitlines():
+            line = raw.strip()
+            if not line:
+                continue
+            bullet = re.match(r"^[-*]\s+(.+)$", line)
+            ordered = re.match(r"^\d+\.\s+(.+)$", line)
+            if bullet:
+                rows.append(bullet.group(1).strip())
+            elif ordered:
+                rows.append(ordered.group(1).strip())
+            else:
+                rows.append(line)
+        normalized = [row for row in rows if row][:limit]
+        return normalized
+
+    def _compose_summary_from_sections(self, sections: dict[str, str]) -> str:
+        overall = str(sections.get("总体总结", "")).strip()
+        highlights = self._parse_markdown_list_sections(sections.get("关键亮点", ""), limit=6)
+        risks = self._parse_markdown_list_sections(sections.get("主要风险", ""), limit=6)
+
+        chunks = [overall] if overall else []
+        if highlights:
+            chunks.append("关键亮点：" + "；".join(highlights))
+        if risks:
+            chunks.append("主要风险：" + "；".join(risks))
+        if not chunks:
+            raise RuntimeError("empty markdown sections")
+        return "\n\n".join(chunks)
+
+    def _default_actions_from_objective(self, objective_data: dict[str, Any]) -> list[str]:
+        incomplete = objective_data.get("incomplete", [])
+        blocked = objective_data.get("blocked", [])
+        if not incomplete and not blocked:
+            return [
+                "保持当前节奏，继续按优先级推进下一阶段任务。",
+                "复盘高效率做法并固化为下周执行模板。",
+                "预留 30 分钟做风险预警和计划缓冲。",
+            ]
+        return [
+            "把未完成事项拆成最小可执行步骤，并明确完成截止时间。",
+            "针对阻塞项逐条指定负责人/依赖项和解除时间点。",
+            "优先处理高优先级任务，降低次要任务占用时间。",
+        ]
 
     def _normalize_percent(self, value: Any, *, default: int = 0) -> int:
         try:

@@ -13,6 +13,7 @@ const reviewState = {
   draftContent: "",
   isEditing: false,
   draftSaveTimer: null,
+  filterKey: "",
 };
 
 function $(id) {
@@ -106,6 +107,7 @@ function persistDraftToLocal(reason = "") {
     const payload = {
       content: reviewState.draftContent || "",
       review_response: reviewState.lastReviewResponse,
+      filter_key: reviewState.filterKey || "",
       updated_at: new Date().toISOString(),
       reason,
     };
@@ -142,6 +144,7 @@ function restoreDraftFromLocal() {
         return {
           content: parsed.content,
           response: parsed.review_response || null,
+          filterKey: String(parsed.filter_key || "").trim(),
         };
       }
     } catch {
@@ -154,6 +157,40 @@ function restoreDraftFromLocal() {
   } catch {
     return null;
   }
+}
+
+function buildReviewFilterKey(form) {
+  return JSON.stringify({
+    range_type: String(form?.range_type?.value || "day"),
+    date: String(form?.date?.value || "").trim(),
+    start_date: String(form?.start_date?.value || "").trim(),
+    end_date: String(form?.end_date?.value || "").trim(),
+  });
+}
+
+function normalizeObjectiveRow(item, fallbackStatus) {
+  const statusRaw = String(item?.status || fallbackStatus || "todo").toLowerCase();
+  const status = statusRaw === "done" || statusRaw === "partial" || statusRaw === "todo" ? statusRaw : fallbackStatus;
+  const percentRaw = Number(item?.percent || 0);
+  const basePercent = Number.isFinite(percentRaw) ? Math.max(0, Math.min(100, Math.round(percentRaw))) : 0;
+  const percent = status === "done" ? 100 : status === "todo" ? 0 : Math.max(1, Math.min(99, basePercent || 50));
+  return {
+    date: String(item?.date || "").trim(),
+    title: String(item?.title || "").trim() || "未命名任务",
+    priority: String(item?.priority || "P2").trim().toUpperCase() || "P2",
+    status,
+    percent,
+    note: String(item?.note || "").trim(),
+  };
+}
+
+function buildFrontendObjectivePayload(autoContext) {
+  return {
+    frontend_completed_list: (autoContext?.done || []).map((row) => normalizeObjectiveRow(row, "done")),
+    frontend_incomplete_list: (autoContext?.undone || []).map((row) => normalizeObjectiveRow(row, "todo")),
+    frontend_blocked_list: (autoContext?.blockers || []).map((row) => normalizeObjectiveRow(row, "todo")),
+    frontend_dates: Array.isArray(autoContext?.dates) ? autoContext.dates : [],
+  };
 }
 
 function resolvePeriod(rangeType, anchorDate, startDate, endDate) {
@@ -351,12 +388,14 @@ async function loadAutoContext(form) {
 
   if (!period.start || !period.end) {
     setContextStatus("请先选择有效的时间范围。", true);
-    return;
+    reviewState.autoContext = { done: [], undone: [], blockers: [], dates: [] };
+    return null;
   }
   const dateKeys = enumerateDateKeys(period.start, period.end);
   if (!dateKeys.length) {
     setContextStatus("时间范围无效，请调整日期。", true);
-    return;
+    reviewState.autoContext = { done: [], undone: [], blockers: [], dates: [] };
+    return null;
   }
 
   const seq = reviewState.latestRequestSeq + 1;
@@ -367,7 +406,7 @@ async function loadAutoContext(form) {
     const dayPlans = await Promise.all(
       dateKeys.map((dateKey) => getJson(`/api/plan/day?date=${encodeURIComponent(dateKey)}`))
     );
-    if (seq !== reviewState.latestRequestSeq) return;
+    if (seq !== reviewState.latestRequestSeq) return null;
 
     const done = [];
     const undone = [];
@@ -402,12 +441,15 @@ async function loadAutoContext(form) {
     renderAutoList($("auto-undone-list"), undone, "系统未识别到未完成任务");
     renderAutoList($("auto-blockers-list"), blockers, "系统未识别到阻塞任务");
     setContextStatus(`已关联 ${dateKeys.length} 天任务数据（已完成 ${done.length} / 未完成 ${undone.length} / 阻塞 ${blockers.length}）`);
+    return reviewState.autoContext;
   } catch (err) {
-    if (seq !== reviewState.latestRequestSeq) return;
+    if (seq !== reviewState.latestRequestSeq) return null;
     setContextStatus(`拉取任务数据失败：${String(err)}`, true);
+    reviewState.autoContext = { done: [], undone: [], blockers: [], dates: dateKeys };
     renderAutoList($("auto-done-list"), [], "拉取失败");
     renderAutoList($("auto-undone-list"), [], "拉取失败");
     renderAutoList($("auto-blockers-list"), [], "拉取失败");
+    return null;
   }
 }
 
@@ -592,6 +634,7 @@ function bindReviewPage() {
   if (!form.date.value) {
     form.date.value = today;
   }
+  reviewState.filterKey = buildReviewFilterKey(form);
 
   const updateSubmitButtonText = (isLoading = false) => {
     const hasResult = Boolean(String(reviewState.draftContent || "").trim());
@@ -681,17 +724,54 @@ function bindReviewPage() {
     if (form.end_date) form.end_date.required = isCustom;
   };
 
-  const triggerAutoContextLoad = () => {
-    loadAutoContext(form);
+  const invalidateDraftByFilterChange = (reason) => {
+    clearDraftCache();
+    reviewState.lastReviewResponse = null;
+    reviewState.filterKey = buildReviewFilterKey(form);
+    if (String(reviewState.draftContent || "").trim()) {
+      setDraftContent("", { persist: false, keepEditing: false });
+    }
+    submitStatus.textContent = `${reason}已变化，旧复盘草稿已清除，请重新生成。`;
+    submitStatus.classList.remove("is-error");
   };
 
-  form.range_type?.addEventListener("change", () => {
+  const triggerAutoContextLoad = () => {
+    return loadAutoContext(form);
+  };
+
+  form.range_type?.addEventListener("change", async () => {
+    const prevKey = reviewState.filterKey;
     toggleCustomRange();
-    triggerAutoContextLoad();
+    const nextKey = buildReviewFilterKey(form);
+    if (prevKey !== nextKey) {
+      invalidateDraftByFilterChange("总结范围");
+    }
+    await triggerAutoContextLoad();
   });
-  form.date?.addEventListener("change", triggerAutoContextLoad);
-  form.start_date?.addEventListener("change", triggerAutoContextLoad);
-  form.end_date?.addEventListener("change", triggerAutoContextLoad);
+  form.date?.addEventListener("change", async () => {
+    const prevKey = reviewState.filterKey;
+    const nextKey = buildReviewFilterKey(form);
+    if (prevKey !== nextKey) {
+      invalidateDraftByFilterChange("基准日期");
+    }
+    await triggerAutoContextLoad();
+  });
+  form.start_date?.addEventListener("change", async () => {
+    const prevKey = reviewState.filterKey;
+    const nextKey = buildReviewFilterKey(form);
+    if (prevKey !== nextKey) {
+      invalidateDraftByFilterChange("自定义日期范围");
+    }
+    await triggerAutoContextLoad();
+  });
+  form.end_date?.addEventListener("change", async () => {
+    const prevKey = reviewState.filterKey;
+    const nextKey = buildReviewFilterKey(form);
+    if (prevKey !== nextKey) {
+      invalidateDraftByFilterChange("自定义日期范围");
+    }
+    await triggerAutoContextLoad();
+  });
 
   form.querySelectorAll("textarea[data-autoresize]").forEach((textarea) => {
     autoResizeTextarea(textarea);
@@ -725,6 +805,13 @@ function bindReviewPage() {
     event.preventDefault();
     const rangeType = String(form.range_type?.value || "day");
     const anchorDate = String(form.date?.value || today).trim();
+    const latestAutoContext = await loadAutoContext(form);
+    if (!latestAutoContext) {
+      submitStatus.textContent = "无法获取最新的系统关联任务数据，请修复时间范围后重试。";
+      submitStatus.classList.add("is-error");
+      return;
+    }
+
     const payload = {
       range_type: rangeType,
       date: anchorDate,
@@ -733,6 +820,7 @@ function bindReviewPage() {
       undone_text: String(form.undone_text?.value || "").trim(),
       blockers_text: String(form.blockers_text?.value || "").trim(),
       persist: false,
+      ...buildFrontendObjectivePayload(latestAutoContext),
     };
     if (rangeType === "custom") {
       const startDate = String(form.start_date?.value || "").trim();
@@ -754,6 +842,7 @@ function bindReviewPage() {
     try {
       const data = await postJson("/api/review", payload);
       reviewState.lastReviewResponse = data;
+      reviewState.filterKey = buildReviewFilterKey(form);
       const markdown = buildReviewMarkdown(data);
       setDraftContent(markdown, { persist: true, keepEditing: false });
       submitStatus.textContent = "复盘总结已生成，草稿已自动缓存。";
@@ -824,12 +913,15 @@ function bindReviewPage() {
   });
 
   const restored = restoreDraftFromLocal();
-  if (restored?.content) {
+  if (restored?.content && (!restored.filterKey || restored.filterKey === buildReviewFilterKey(form))) {
     reviewState.lastReviewResponse = restored.response;
     setDraftContent(restored.content, { persist: false, keepEditing: false });
     submitStatus.textContent = "检测到未保存的复盘草稿，已为您恢复。";
     submitStatus.classList.remove("is-error");
   } else {
+    if (restored?.content) {
+      clearDraftCache();
+    }
     renderReviewResult("");
     updateEditUI();
     updateSubmitButtonText(false);

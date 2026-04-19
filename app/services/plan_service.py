@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Iterator
 from datetime import date
 from typing import Any
 from uuid import uuid4
@@ -11,6 +12,8 @@ from ..db import get_connection, now_iso
 from ..schemas import (
     PlanDraftAssignRequest,
     PlanDraftAssignResponse,
+    PlanDraftEnrichRequest,
+    PlanDraftEnrichResponse,
     PlanDraftGenerateRequest,
     PlanDraftGenerateResponse,
     PlanDraftTask,
@@ -18,6 +21,8 @@ from ..schemas import (
     PlanItemCreateRequest,
     PlanItemDeleteRequest,
     PlanItemMoveResponse,
+    PlanItemOptimizeRequest,
+    PlanItemOptimizeResponse,
     PlanItemRescheduleRequest,
     PlanDayCommitRequest,
     PlanItem,
@@ -203,7 +208,11 @@ class PlanService:
         if req.item_index >= len(items):
             raise RuntimeError("item_index is out of range.")
 
-        current = dict(items[req.item_index])
+        if req.source_item is not None:
+            source_raw = req.source_item.model_dump() if isinstance(req.source_item, PlanItem) else req.source_item
+            current = self._normalize_plan_item_dict(source_raw, req.item_index + 1)
+        else:
+            current = dict(items[req.item_index])
         goal_text = str(payload.get("goal_text", "")).strip()
         target_date = req.date
         memory_refs = self._collect_memory_refs(goal_text or current.get("title", ""))
@@ -245,6 +254,44 @@ class PlanService:
 
         return self.get_plan(req.date)
 
+    def optimize_plan_item(self, req: PlanItemOptimizeRequest) -> PlanItemOptimizeResponse:
+        source_row = {
+            "title": req.title,
+            "priority": req.priority,
+            "estimate_hours": req.estimate_hours,
+            "done_definition": req.done_definition,
+            "checklist": [item.model_dump() if isinstance(item, PlanChecklistItem) else item for item in req.checklist],
+            "progress_status": req.progress_status,
+            "progress_percent": req.progress_percent,
+            "progress_note": req.progress_note,
+        }
+        current_item = self._normalize_plan_item_dict(source_row, 1)
+
+        target_date = req.date or date.today()
+        goal_text = str(req.goal_text or "").strip()
+        if req.date and not goal_text:
+            payload = self._load_daily_plan_payload(req.date)
+            if payload is not None:
+                goal_text = str(payload.get("goal_text", "")).strip()
+
+        memory_refs = self._collect_memory_refs(goal_text or current_item.get("title", ""))
+        fixed_schedule_refs = self._collect_fixed_schedule_refs(target_date)
+        optimized = self._regenerate_item_replace(
+            goal_text=goal_text,
+            target_date=target_date,
+            current_item=current_item,
+            memory_refs=memory_refs,
+            fixed_schedule_refs=fixed_schedule_refs,
+        )
+        source_model = self.settings.chat_model if self.llm_service.is_ready() else "rule-based"
+        return PlanItemOptimizeResponse(
+            item=PlanItem(**optimized),
+            item_index=req.item_index,
+            source_model=source_model,
+            fallback=not self.llm_service.is_ready(),
+            note="仅返回当前任务优化结果，不会修改其他任务。",
+        )
+
     def generate_draft_pool(self, req: PlanDraftGenerateRequest) -> PlanDraftGenerateResponse:
         reference_date = date.today()
         span_days = self._infer_draft_span_days(req.goal_text)
@@ -272,6 +319,87 @@ class PlanService:
             inferred_span_days=span_days,
             goal_text=req.goal_text,
             draft_tasks=draft_tasks,
+            source_model=source_model,
+            fallback=fallback,
+            note=note,
+        )
+
+    def generate_draft_pool_stream(self, req: PlanDraftGenerateRequest) -> Iterator[tuple[str, dict[str, Any]]]:
+        reference_date = date.today()
+        span_days = self._infer_draft_span_days(req.goal_text)
+        memory_refs = self._collect_memory_refs(req.goal_text)
+        fixed_refs = self._collect_fixed_schedule_refs(reference_date)
+        for cursor in range(1, min(span_days, 7)):
+            date_cursor = reference_date.fromordinal(reference_date.toordinal() + cursor)
+            for row in self._collect_fixed_schedule_refs(date_cursor):
+                if row not in fixed_refs:
+                    fixed_refs.append(row)
+
+        target_count = max(4, min(24, span_days * 3))
+        yield (
+            "start",
+            {
+                "reference_date": reference_date.isoformat(),
+                "inferred_span_days": span_days,
+                "target_count": target_count,
+                "goal_text": req.goal_text,
+                "message": "开始生成任务草稿池",
+            },
+        )
+
+        tasks, note, source_model, fallback = self._generate_draft_task_outlines(
+            goal_text=req.goal_text,
+            reference_date=reference_date,
+            span_days=span_days,
+            memory_refs=memory_refs,
+            fixed_schedule_refs=fixed_refs[:12],
+        )
+
+        draft_tasks: list[PlanDraftTask] = []
+        total = len(tasks)
+        for index, task in enumerate(tasks, start=1):
+            draft = PlanDraftTask(draft_id=f"draft-{uuid4().hex[:12]}", **task.model_dump())
+            draft_tasks.append(draft)
+            yield (
+                "task",
+                {
+                    "index": index,
+                    "total": total,
+                    "task": draft.model_dump(),
+                },
+            )
+            yield (
+                "status",
+                {
+                    "index": index,
+                    "total": total,
+                    "message": f"已生成 {index}/{total} 条草稿任务",
+                },
+            )
+
+        yield (
+            "complete",
+            {
+                "reference_date": reference_date.isoformat(),
+                "inferred_span_days": span_days,
+                "goal_text": req.goal_text,
+                "draft_tasks": [task.model_dump() for task in draft_tasks],
+                "source_model": source_model,
+                "fallback": fallback,
+                "note": note,
+            },
+        )
+
+    def enrich_draft_task(self, req: PlanDraftEnrichRequest) -> PlanDraftEnrichResponse:
+        raw = req.task.model_dump()
+        normalized = self._normalize_plan_item_dict(raw, 1)
+        enriched_item, source_model, fallback, note = self._enrich_draft_task_detail(
+            goal_text=req.goal_text,
+            current_item=normalized,
+        )
+        enriched = PlanDraftTask(draft_id=req.task.draft_id, **enriched_item.model_dump())
+        return PlanDraftEnrichResponse(
+            task=enriched,
             source_model=source_model,
             fallback=fallback,
             note=note,
@@ -639,12 +767,12 @@ class PlanService:
             "JSON schema:\n"
             "{\n"
             '  "plan_items": [\n'
-            '    {"title":"...", "priority":"P0|P1|P2", "estimate_hours":1.5, "done_definition":"...", "checklist":[{"content":"...", "is_done":false}]}\n'
+            '    {"title":"...", "priority":"P0|P1|P2|P3", "estimate_hours":1.5, "done_definition":"...", "checklist":[{"content":"...", "is_done":false}]}\n'
             "  ],\n"
             '  "note":"one short sentence"\n'
             "}\n"
             "Rules:\n"
-            "1) plan_items should contain 3-8 concrete tasks for one day, sorted by priority from P0 to P2.\n"
+            "1) plan_items should contain 3-8 concrete tasks for one day, sorted by priority from P0 to P3.\n"
             "2) Every task must include 2-5 actionable checklist steps.\n"
             "3) Avoid time-slot language like morning/afternoon/evening scheduling.\n"
             "4) Respect fixed schedules provided by user context.\n"
@@ -662,7 +790,7 @@ class PlanService:
             f"{fixed_schedule_block}\n"
             "Relevant memory:\n"
             f"{memory_block}\n"
-            "Please generate a practical daily task checklist prioritized by P0/P1/P2.\n"
+            "Please generate a practical daily task checklist prioritized by P0/P1/P2/P3.\n"
             "Return JSON only."
         )
 
@@ -708,7 +836,7 @@ class PlanService:
             "JSON schema:\n"
             "{\n"
             '  "tasks": [\n'
-            '    {"title":"...", "priority":"P0|P1|P2", "estimate_hours":1.5, "done_definition":"...", "checklist":[{"content":"...", "is_done":false}]}\n'
+            '    {"title":"...", "priority":"P0|P1|P2|P3", "estimate_hours":1.5, "done_definition":"...", "checklist":[{"content":"...", "is_done":false}]}\n'
             "  ],\n"
             '  "note":"one short sentence"\n'
             "}\n"
@@ -717,7 +845,7 @@ class PlanService:
             "2) Tasks must be independent and suitable for manual distribution across multiple dates.\n"
             "3) Every task needs 2-5 executable checklist steps.\n"
             "4) Avoid specific time-slot words like morning/afternoon/evening.\n"
-            "5) Priorities should be balanced across P0/P1/P2.\n"
+            "5) Priorities should be balanced across P0/P1/P2/P3.\n"
             "6) User may provide natural-language duration like '2周/3天/一个月'; align workload roughly to it.\n"
             "7) Hidden context: today is provided by the system; use it only for pacing, do not expose it in output.\n"
         )
@@ -768,6 +896,159 @@ class PlanService:
                 True,
             )
 
+    def _generate_draft_task_outlines(
+        self,
+        *,
+        goal_text: str,
+        reference_date: date,
+        span_days: int,
+        memory_refs: list[str],
+        fixed_schedule_refs: list[str],
+    ) -> tuple[list[PlanItem], str, str, bool]:
+        target_count = max(4, min(24, span_days * 3))
+        if not self.llm_service.is_ready():
+            fallback_items = self._build_rule_based_draft_task_outlines(goal_text, target_count)
+            return (
+                fallback_items,
+                "GLM_API_KEY not configured. Used rule-based draft outlines.",
+                "rule-based",
+                True,
+            )
+
+        system_prompt = (
+            "You are a task drafting assistant for multi-day planning.\n"
+            "Output strict JSON only.\n"
+            "JSON schema:\n"
+            "{\n"
+            '  "tasks": [\n'
+            '    {"title":"...", "priority":"P0|P1|P2|P3", "estimate_hours":1.5}\n'
+            "  ],\n"
+            '  "note":"one short sentence"\n'
+            "}\n"
+            "Rules:\n"
+            f"1) tasks should contain {target_count} items (allow +/-2), all in Simplified Chinese.\n"
+            "2) Keep each task concise and independently assignable across different future dates.\n"
+            "3) Do NOT output checklist or long explanations.\n"
+            "4) Priorities should be balanced across P0/P1/P2/P3.\n"
+            "5) User may mention duration like 2周/3天/1个月; align workload roughly.\n"
+        )
+        memory_block = "\n".join(f"- {item}" for item in memory_refs) or "- N/A"
+        fixed_schedule_block = "\n".join(f"- {item}" for item in fixed_schedule_refs) or "- N/A"
+        local_context_block = build_local_context_block(self.settings)
+        user_prompt = (
+            f"[System hidden variable] Today is {reference_date.isoformat()}\n"
+            f"Inferred workload horizon: about {span_days} days\n"
+            f"Goal: {goal_text}\n"
+            "Local context:\n"
+            f"{local_context_block}\n"
+            "Effective fixed schedules in this period:\n"
+            f"{fixed_schedule_block}\n"
+            "Relevant memory:\n"
+            f"{memory_block}\n"
+            "Please generate only concise draft task outlines in JSON."
+        )
+
+        try:
+            raw_reply, model_name = self.llm_service.chat(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                history=None,
+            )
+            payload = self._extract_json_object(raw_reply)
+            rows = payload.get("tasks", [])
+            if not isinstance(rows, list):
+                raise ValueError("tasks is not a list")
+
+            parsed_items: list[PlanItem] = []
+            for index, raw in enumerate(rows[:24], start=1):
+                if not isinstance(raw, dict):
+                    continue
+                normalized = self._normalize_plan_item_dict(
+                    {
+                        "title": raw.get("title"),
+                        "priority": raw.get("priority"),
+                        "estimate_hours": raw.get("estimate_hours"),
+                        "done_definition": "先完成任务主目标，详情可按需生成。",
+                        "checklist": [],
+                    },
+                    index,
+                )
+                parsed_items.append(PlanItem(**normalized))
+
+            if not parsed_items:
+                raise ValueError("tasks must contain at least one valid item")
+
+            note = str(payload.get("note", "")).strip()
+            return (
+                self._sort_plan_items(parsed_items),
+                note or f"Draft outlines generated by {model_name}.",
+                model_name,
+                False,
+            )
+        except Exception as exc:
+            fallback_items = self._build_rule_based_draft_task_outlines(goal_text, target_count)
+            return (
+                fallback_items,
+                f"LLM outline generation failed ({exc}). Used rule-based draft outlines.",
+                "rule-based",
+                True,
+            )
+
+    def _enrich_draft_task_detail(
+        self,
+        *,
+        goal_text: str,
+        current_item: dict[str, Any],
+    ) -> tuple[PlanItem, str, bool, str]:
+        if not self.llm_service.is_ready():
+            enriched = dict(current_item)
+            if not str(enriched.get("done_definition", "")).strip():
+                enriched["done_definition"] = "完成该任务并形成可验证产出。"
+            if not isinstance(enriched.get("checklist"), list) or not enriched.get("checklist"):
+                enriched["checklist"] = self._default_checklist_items()
+            return PlanItem(**self._normalize_plan_item_dict(enriched, 1)), "rule-based", True, "Used rule-based enrichment."
+
+        system_prompt = (
+            "你是任务拆解助手。请针对单个任务补全完成定义与子任务清单。\n"
+            "输出严格 JSON：\n"
+            "{\n"
+            '  "done_definition":"...",\n'
+            '  "checklist":[{"content":"...", "is_done":false}]\n'
+            "}\n"
+            "规则：\n"
+            "1) 只处理当前这个任务，不要生成其他任务。\n"
+            "2) checklist 输出 3-6 条可执行步骤。\n"
+            "3) 使用简体中文。\n"
+        )
+        user_prompt = (
+            f"总体目标：{goal_text or '未提供'}\n"
+            f"任务：{json.dumps(current_item, ensure_ascii=False)}\n"
+            "请返回 JSON。"
+        )
+        try:
+            raw_reply, model_name = self.llm_service.chat(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                history=None,
+            )
+            payload = self._extract_json_object(raw_reply)
+            merged = dict(current_item)
+            done_definition = str(payload.get("done_definition", "")).strip()
+            if done_definition:
+                merged["done_definition"] = done_definition
+            if isinstance(payload.get("checklist"), list):
+                merged["checklist"] = payload["checklist"]
+            normalized = self._normalize_plan_item_dict(merged, 1)
+            return PlanItem(**normalized), model_name, False, "Enriched by LLM."
+        except Exception as exc:
+            enriched = dict(current_item)
+            if not str(enriched.get("done_definition", "")).strip():
+                enriched["done_definition"] = "完成该任务并形成可验证产出。"
+            if not isinstance(enriched.get("checklist"), list) or not enriched.get("checklist"):
+                enriched["checklist"] = self._default_checklist_items()
+            normalized = self._normalize_plan_item_dict(enriched, 1)
+            return PlanItem(**normalized), "rule-based", True, f"LLM enrichment failed ({exc}). Used rule-based fallback."
+
     def _build_rule_based_draft_tasks(self, goal_text: str, target_count: int) -> list[PlanItem]:
         base_labels = [
             ("明确核心目标与评估标准", "P0"),
@@ -798,6 +1079,36 @@ class PlanService:
                             PlanChecklistItem(content="执行核心步骤并记录结果", is_done=False),
                             PlanChecklistItem(content="复盘问题并确定下一步", is_done=False),
                         ],
+                    )
+                )
+            round_index += 1
+        return self._sort_plan_items(tasks)
+
+    def _build_rule_based_draft_task_outlines(self, goal_text: str, target_count: int) -> list[PlanItem]:
+        base_labels = [
+            ("明确核心目标与评估标准", "P0"),
+            ("梳理关键知识点与资料", "P0"),
+            ("完成高优先级实操练习", "P1"),
+            ("输出阶段性总结与复盘", "P1"),
+            ("补齐薄弱项并形成笔记", "P2"),
+            ("整理下一步行动计划", "P3"),
+        ]
+        tasks: list[PlanItem] = []
+        round_index = 1
+        while len(tasks) < target_count:
+            for label, priority in base_labels:
+                if len(tasks) >= target_count:
+                    break
+                title = f"{goal_text}：{label}"
+                if round_index > 1:
+                    title = f"{title}（第{round_index}轮）"
+                tasks.append(
+                    PlanItem(
+                        title=title,
+                        priority=priority,
+                        estimate_hours=1.5 if priority in {"P0", "P1"} else 1.0,
+                        done_definition="先完成任务主目标，详情可按需生成。",
+                        checklist=[],
                     )
                 )
             round_index += 1
@@ -1004,12 +1315,16 @@ class PlanService:
 
     def _normalize_priority(self, raw_priority: Any, index: int) -> str:
         value = str(raw_priority or "").upper().strip()
-        if value in {"P0", "P1", "P2"}:
+        if value in {"P0", "P1", "P2", "P3"}:
             return value
         if index == 1:
             return "P0"
         if index == 2:
             return "P1"
+        if index == 3:
+            return "P2"
+        if index == 4:
+            return "P3"
         return "P2"
 
     def _normalize_progress_status(self, raw_status: Any) -> str:
@@ -1123,30 +1438,33 @@ class PlanService:
             return self._rule_based_replace_item(current_item)
 
         system_prompt = (
-            "You are refining one task in a daily plan. Output strict JSON only.\n"
-            "Schema:\n"
+            "你是一个任务拆解专家。现在用户提供了一个【独立任务】草稿，请只优化该单一任务的描述。\n"
+            "输出必须是严格 JSON，不要输出任何额外文字。\n"
+            "JSON Schema:\n"
             "{\n"
             '  "title":"...",\n'
-            '  "priority":"P0|P1|P2",\n'
-            '  "estimate_hours":1.5,\n'
             '  "done_definition":"...",\n'
-            '  "checklist":[{"content":"...", "is_done":false}]\n'
+            '  "checklist":[{"content":"...", "is_done":false}],\n'
+            '  "priority":"P0|P1|P2|P3",\n'
+            '  "estimate_hours":1.5\n'
             "}\n"
-            "Rules:\n"
-            "1) Generate a different but still practical alternative task.\n"
-            "2) Keep it aligned with overall goal and date context.\n"
-            "3) checklist should contain 3-6 executable items.\n"
-            "4) Simplified Chinese only.\n"
+            "严格约束：\n"
+            "1) 绝对不要引申、捏造或返回多个任务。\n"
+            "2) 只返回针对该任务的优化结果。\n"
+            "3) checklist 保持 3-6 条、可执行、去重复。\n"
+            "4) 使用简体中文。\n"
         )
         memory_block = "\n".join(f"- {item}" for item in memory_refs) or "- N/A"
         schedule_block = "\n".join(f"- {item}" for item in fixed_schedule_refs) or "- N/A"
         user_prompt = (
-            f"Date: {target_date.isoformat()}\n"
-            f"Overall goal: {goal_text}\n"
-            f"Current item: {json.dumps(current_item, ensure_ascii=False)}\n"
-            f"Fixed schedules:\n{schedule_block}\n"
-            f"Relevant memory:\n{memory_block}\n"
-            "Please provide one alternative task item in JSON only."
+            f"今天日期：{target_date.isoformat()}\n"
+            f"整体目标：{goal_text or '未提供'}\n"
+            f"【原任务标题】：{current_item.get('title', '')}\n"
+            f"【原完成定义】：{current_item.get('done_definition', '')}\n"
+            f"【原子任务列表】：{json.dumps(current_item.get('checklist', []), ensure_ascii=False)}\n"
+            f"固定安排参考：\n{schedule_block}\n"
+            f"相关记忆参考：\n{memory_block}\n"
+            "请仅返回该单任务优化结果的 JSON。"
         )
         try:
             raw_reply, _ = self.llm_service.chat(
@@ -1155,7 +1473,22 @@ class PlanService:
                 history=None,
             )
             parsed = self._extract_json_object(raw_reply)
-            return self._normalize_plan_item_dict(parsed, 1)
+            merged = dict(current_item)
+            title = str(parsed.get("title", "")).strip()
+            if title:
+                merged["title"] = title
+            done_definition = str(parsed.get("done_definition", "")).strip()
+            if done_definition:
+                merged["done_definition"] = done_definition
+            priority = str(parsed.get("priority", "")).strip().upper()
+            if priority in {"P0", "P1", "P2", "P3"}:
+                merged["priority"] = priority
+            estimate_raw = parsed.get("estimate_hours")
+            if isinstance(estimate_raw, (int, float)) and 0 < float(estimate_raw) <= 24:
+                merged["estimate_hours"] = float(estimate_raw)
+            if isinstance(parsed.get("checklist"), list):
+                merged["checklist"] = parsed["checklist"]
+            return self._normalize_plan_item_dict(merged, 1)
         except Exception:
             return self._rule_based_replace_item(current_item)
 
@@ -1214,17 +1547,31 @@ class PlanService:
 
     def _rule_based_replace_item(self, current_item: dict[str, Any]) -> dict[str, Any]:
         base_title = str(current_item.get("title", "任务")).strip() or "任务"
-        checklist = [
-            {"content": "重新定义该任务的验收标准", "is_done": False},
-            {"content": f"产出 {base_title} 的替代方案并比较优缺点", "is_done": False},
-            {"content": "选择一个可执行方案并安排第一步动作", "is_done": False},
-            {"content": "记录风险与依赖，准备下一步", "is_done": False},
-        ]
+        base_definition = str(current_item.get("done_definition", "")).strip()
+        checklist = self._normalize_checklist_items(current_item.get("checklist"))
+        if checklist:
+            polished_checklist: list[dict[str, Any]] = []
+            for row in checklist:
+                text = str(row.get("content", "")).strip()
+                if text:
+                    polished_checklist.append(
+                        {
+                            "content": text if text.endswith("。") else f"{text}。",
+                            "is_done": bool(row.get("is_done", False)),
+                        }
+                    )
+            checklist = polished_checklist
+        else:
+            checklist = [
+                {"content": "明确本任务的输入条件与输出物。", "is_done": False},
+                {"content": "按优先级拆分执行步骤并逐条完成。", "is_done": False},
+                {"content": "完成后自检并记录下一步行动。", "is_done": False},
+            ]
+
         replaced = dict(current_item)
-        replaced["title"] = f"{base_title}（备选方案）"
+        replaced["title"] = base_title
+        replaced["done_definition"] = base_definition or f"完成 {base_title} 的关键输出，并通过自检。"
         replaced["checklist"] = checklist
-        replaced["progress_status"] = "todo"
-        replaced["progress_percent"] = 0
         return replaced
 
     def _rule_based_split_item(self, current_item: dict[str, Any]) -> dict[str, Any]:
@@ -1304,7 +1651,11 @@ class PlanService:
             return 0
         if value == "P1":
             return 1
-        return 2
+        if value == "P2":
+            return 2
+        if value == "P3":
+            return 3
+        return 9
 
     def _sort_plan_items(self, items: list[PlanItem]) -> list[PlanItem]:
         return sorted(

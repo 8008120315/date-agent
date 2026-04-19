@@ -45,7 +45,7 @@ class PlanItemProgressUpdateRequest(BaseModel):
     date: DateType
     item_index: int = Field(ge=0, le=100)
     title: str | None = Field(default=None, min_length=1, max_length=200)
-    priority: str | None = Field(default=None, pattern=r"^P[0-2]$")
+    priority: str | None = Field(default=None, pattern=r"^P[0-3]$")
     estimate_hours: float | None = Field(default=None, gt=0, le=24)
     done_definition: str | None = Field(default=None, max_length=1000)
     checklist: list[PlanChecklistItem] | None = None
@@ -64,6 +64,29 @@ class PlanItemRegenerateRequest(BaseModel):
     date: DateType
     item_index: int = Field(ge=0, le=100)
     action: PlanItemRegenerateAction = "replace"
+    source_item: PlanItem | None = None
+
+
+class PlanItemOptimizeRequest(BaseModel):
+    date: DateType | None = None
+    item_index: int | None = Field(default=None, ge=0, le=200)
+    goal_text: str = Field(default="", max_length=500)
+    title: str = Field(min_length=1, max_length=200)
+    priority: str = Field(default="P2", pattern=r"^P[0-3]$")
+    estimate_hours: float | None = Field(default=None, gt=0, le=24)
+    done_definition: str = Field(default="", max_length=1000)
+    checklist: list[PlanChecklistItem] = Field(default_factory=list)
+    progress_status: PlanTaskStatus = "todo"
+    progress_percent: int = Field(default=0, ge=0, le=100)
+    progress_note: str = Field(default="", max_length=1000)
+
+
+class PlanItemOptimizeResponse(BaseModel):
+    item: PlanItem
+    item_index: int | None = Field(default=None, ge=0, le=200)
+    source_model: str = "rule-based"
+    fallback: bool = False
+    note: str = ""
 
 
 class PlanDraftGenerateRequest(BaseModel):
@@ -79,6 +102,18 @@ class PlanDraftGenerateResponse(BaseModel):
     inferred_span_days: int = Field(ge=1, le=90)
     goal_text: str
     draft_tasks: list[PlanDraftTask] = Field(default_factory=list)
+    source_model: str = "rule-based"
+    fallback: bool = False
+    note: str = ""
+
+
+class PlanDraftEnrichRequest(BaseModel):
+    goal_text: str = Field(default="", max_length=500)
+    task: PlanDraftTask
+
+
+class PlanDraftEnrichResponse(BaseModel):
+    task: PlanDraftTask
     source_model: str = "rule-based"
     fallback: bool = False
     note: str = ""
@@ -100,7 +135,7 @@ class PlanDraftAssignResponse(BaseModel):
 class PlanItemCreateRequest(BaseModel):
     date: DateType
     title: str = Field(min_length=1, max_length=200)
-    priority: str = Field(default="P2", pattern=r"^P[0-2]$")
+    priority: str = Field(default="P2", pattern=r"^P[0-3]$")
     estimate_hours: float | None = Field(default=None, gt=0, le=24)
     done_definition: str = Field(default="", max_length=1000)
     checklist: list[PlanChecklistItem] = Field(default_factory=list)
@@ -141,6 +176,15 @@ class PlanItemMoveResponse(BaseModel):
 ReviewRangeType = Literal["day", "last_3_days", "last_week", "custom"]
 
 
+class ReviewObjectiveItem(BaseModel):
+    date: str = Field(default="", max_length=20)
+    title: str = Field(min_length=1, max_length=300)
+    priority: str = Field(default="P2", max_length=8)
+    status: str = Field(default="todo", max_length=20)
+    percent: int = Field(default=0, ge=0, le=100)
+    note: str = Field(default="", max_length=1000)
+
+
 class ReviewRequest(BaseModel):
     range_type: ReviewRangeType = "day"
     date: DateType | None = None
@@ -151,6 +195,10 @@ class ReviewRequest(BaseModel):
     done_text: str = Field(default="", max_length=1000)
     undone_text: str = Field(default="", max_length=1000)
     blockers_text: str = Field(default="", max_length=1000)
+    frontend_completed_list: list[ReviewObjectiveItem] = Field(default_factory=list)
+    frontend_incomplete_list: list[ReviewObjectiveItem] = Field(default_factory=list)
+    frontend_blocked_list: list[ReviewObjectiveItem] = Field(default_factory=list)
+    frontend_dates: list[str] = Field(default_factory=list, max_length=31)
 
 
 class ReviewResponse(BaseModel):

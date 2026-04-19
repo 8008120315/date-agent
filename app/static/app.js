@@ -9,7 +9,7 @@ const state = {
   splitModalBound: false,
 };
 
-const PRIORITY_ORDER = { P0: 0, P1: 1, P2: 2 };
+const PRIORITY_ORDER = { P0: 0, P1: 1, P2: 2, P3: 3 };
 let draftSeed = 1;
 
 function showOutput(data) {
@@ -266,9 +266,11 @@ function sortPlanEntries(items) {
   return items
     .map((item, index) => ({ item: normalizePlanItem(item), index }))
     .sort((a, b) => {
-      const rank = PRIORITY_ORDER[a.item.priority] - PRIORITY_ORDER[b.item.priority];
+      const rankA = PRIORITY_ORDER[a.item.priority] ?? 99;
+      const rankB = PRIORITY_ORDER[b.item.priority] ?? 99;
+      const rank = rankA - rankB;
       if (rank !== 0) return rank;
-      return String(a.item.title || "").localeCompare(String(b.item.title || ""), "zh-CN");
+      return a.index - b.index;
     });
 }
 
@@ -279,6 +281,29 @@ function getManualDrafts(dateKey) {
 
 function setManualDrafts(dateKey, drafts) {
   state.manualDraftsByDate.set(dateKey, Array.isArray(drafts) ? drafts : []);
+}
+
+function mergePlanItemAtIndex(dateKey, itemIndex, incomingItem) {
+  if (!Number.isFinite(itemIndex) || itemIndex < 0) return false;
+  const plan = state.plansByDate.get(dateKey);
+  if (!plan || !Array.isArray(plan.plan_items)) return false;
+  if (itemIndex >= plan.plan_items.length) return false;
+
+  const current = normalizePlanItem(plan.plan_items[itemIndex] || {});
+  const incoming = normalizePlanItem(incomingItem || {});
+  const merged = normalizePlanItem({
+    ...current,
+    ...incoming,
+    checklist: Array.isArray(incoming.checklist) ? incoming.checklist : current.checklist,
+  });
+
+  const nextItems = plan.plan_items.slice();
+  nextItems[itemIndex] = merged;
+  state.plansByDate.set(dateKey, {
+    ...plan,
+    plan_items: nextItems,
+  });
+  return true;
 }
 
 function removeManualDraft(dateKey, draftId) {
@@ -410,7 +435,13 @@ function buildChecklistHtml(dateKey, items) {
       `;
 
     return `
-      <article class="task-card ${isDraft ? "is-draft-card" : ""}" data-item-index="${persistedIndex ?? ""}" data-draft-id="${escapeHtml(draftId)}">
+      <article
+        class="task-card ${isDraft ? "is-draft-card" : ""}"
+        data-item-index="${persistedIndex ?? ""}"
+        data-draft-id="${escapeHtml(draftId)}"
+        data-sort-origin="${displayIdx}"
+        data-priority="${priority}"
+      >
         <header class="task-card-head">
           <div class="task-card-title-wrap">
             <h4>${title}</h4>
@@ -418,7 +449,7 @@ function buildChecklistHtml(dateKey, items) {
           </div>
           <div class="task-card-meta">
             <span class="status-pill ${statusClass(status)}" data-role="status-pill">${statusLabel(status, percent)}</span>
-            <span class="task-priority">${priority}</span>
+            <span class="task-priority" data-role="priority-pill">${priority}</span>
             <span class="task-estimate">${escapeHtml(estimate)}</span>
           </div>
         </header>
@@ -434,6 +465,7 @@ function buildChecklistHtml(dateKey, items) {
               <option value="P0" ${item.priority === "P0" ? "selected" : ""}>P0</option>
               <option value="P1" ${item.priority === "P1" ? "selected" : ""}>P1</option>
               <option value="P2" ${item.priority === "P2" ? "selected" : ""}>P2</option>
+              <option value="P3" ${item.priority === "P3" ? "selected" : ""}>P3</option>
             </select>
           </label>
           <label class="task-field task-field-estimate">
@@ -708,6 +740,72 @@ function wireTaskBoardEvents(dateKey) {
     };
   };
 
+  const getCardPriorityRank = (card) => {
+    const select = card.querySelector('[data-role="priority"]');
+    const value = normalizePriority(select?.value || card.dataset.priority || "P3");
+    return PRIORITY_ORDER[value] ?? 99;
+  };
+
+  const getCardStableOrder = (card, fallbackIndex = 0) => {
+    const origin = Number(card.dataset.sortOrigin);
+    if (Number.isFinite(origin)) return origin;
+    const persistedIndex = Number(card.dataset.itemIndex);
+    if (Number.isFinite(persistedIndex)) return persistedIndex + 1000;
+    return 100000 + fallbackIndex;
+  };
+
+  // Derived view list: generate a sorted copy without mutating source data.
+  const getSortedTaskCards = (cards) =>
+    cards
+      .map((card, idx) => ({ card, idx }))
+      .sort((a, b) => {
+        const rankDiff = getCardPriorityRank(a.card) - getCardPriorityRank(b.card);
+        if (rankDiff !== 0) return rankDiff;
+        return getCardStableOrder(a.card, a.idx) - getCardStableOrder(b.card, b.idx);
+      })
+      .map((entry) => entry.card);
+
+  // FLIP animation for smooth card reordering.
+  const animateTaskCardReorder = () => {
+    const cards = Array.from(board.querySelectorAll(".task-card"));
+    if (cards.length <= 1) return;
+
+    const firstRects = new Map(cards.map((card) => [card, card.getBoundingClientRect()]));
+    const sortedCards = getSortedTaskCards(cards);
+    let hasOrderChange = false;
+    sortedCards.forEach((card, index) => {
+      if (board.children[index] !== card) {
+        hasOrderChange = true;
+      }
+      board.appendChild(card);
+    });
+    if (!hasOrderChange) return;
+
+    sortedCards.forEach((card) => {
+      const first = firstRects.get(card);
+      if (!first) return;
+      const last = card.getBoundingClientRect();
+      const dx = first.left - last.left;
+      const dy = first.top - last.top;
+      if (Math.abs(dx) < 1 && Math.abs(dy) < 1) return;
+
+      card.classList.add("is-sort-moving");
+      card.style.transform = `translate(${dx}px, ${dy}px)`;
+      card.style.transition = "transform 0s";
+      requestAnimationFrame(() => {
+        card.style.transition = "transform 280ms cubic-bezier(0.22, 1, 0.36, 1)";
+        card.style.transform = "translate(0, 0)";
+      });
+      const clear = () => {
+        card.classList.remove("is-sort-moving");
+        card.style.transform = "";
+        card.style.transition = "";
+        card.removeEventListener("transitionend", clear);
+      };
+      card.addEventListener("transitionend", clear);
+    });
+  };
+
   const wireCard = (card) => {
     const isDraft = Boolean(String(card.dataset.draftId || "").trim());
     const draftId = String(card.dataset.draftId || "").trim();
@@ -715,6 +813,8 @@ function wireTaskBoardEvents(dateKey) {
     const statusInputs = card.querySelectorAll('[data-role="status"]');
     const partialWrap = card.querySelector('[data-role="partial-wrap"]');
     const percentInput = card.querySelector('[data-role="percent"]');
+    const priorityInput = card.querySelector('[data-role="priority"]');
+    const priorityPill = card.querySelector('[data-role="priority-pill"]');
     const percentValue = card.querySelector('[data-role="percent-value"]');
     const progressModeHint = card.querySelector('[data-role="progress-mode-hint"]');
     const statusPill = card.querySelector('[data-role="status-pill"]');
@@ -737,6 +837,14 @@ function wireTaskBoardEvents(dateKey) {
     let saveBtnResetTimer = null;
     let saveInFlight = false;
     let hasPendingAutoSave = false;
+    let optimizeInFlight = false;
+
+    const setCardOptimizing = (busy) => {
+      optimizeInFlight = Boolean(busy);
+      card.classList.toggle("is-optimizing", optimizeInFlight);
+      card.setAttribute("aria-busy", optimizeInFlight ? "true" : "false");
+    };
+    setCardOptimizing(optimizeInFlight);
 
     const checklistRows = () => Array.from(card.querySelectorAll('[data-role="checklist-row"]'));
     const hasChecklist = () => collectChecklistFromCard(card).length > 0;
@@ -933,7 +1041,18 @@ function wireTaskBoardEvents(dateKey) {
       syncStatusBadge();
     });
 
+    priorityInput?.addEventListener("change", () => {
+      const normalized = normalizePriority(priorityInput.value);
+      priorityInput.value = normalized;
+      card.dataset.priority = normalized;
+      if (priorityPill) {
+        priorityPill.textContent = normalized;
+      }
+      animateTaskCardReorder();
+    });
+
     const saveCardProgress = async ({ auto = false } = {}) => {
+      if (optimizeInFlight) return;
       if (saveInFlight) {
         if (auto && !isDraft) {
           hasPendingAutoSave = true;
@@ -1115,6 +1234,7 @@ function wireTaskBoardEvents(dateKey) {
 
     const bindRegenerate = (button, action) => {
       button?.addEventListener("click", async () => {
+        if (optimizeInFlight || saveInFlight) return;
         if (!Number.isFinite(itemIndex)) return;
         const built = buildPlanItemPayloadFromCard(card);
         if (built.error) {
@@ -1123,18 +1243,37 @@ function wireTaskBoardEvents(dateKey) {
           return;
         }
         const originalText = button.textContent;
+        setCardOptimizing(true);
         button.disabled = true;
         button.textContent = "处理中...";
         try {
-          await putJson("/api/plan/item", {
-            date: dateKey,
-            item_index: itemIndex,
-            ...built.item,
-          });
+          if (action === "replace") {
+            const goalText = String(state.plansByDate.get(dateKey)?.goal_text || "").trim();
+            const optimized = await postJson("/api/plan/item/optimize", {
+              date: dateKey,
+              item_index: itemIndex,
+              goal_text: goalText,
+              ...built.item,
+            });
+            const merged = mergePlanItemAtIndex(dateKey, itemIndex, optimized?.item);
+            if (!merged) {
+              await loadPlanForDate(dateKey);
+            }
+            const latestPlan = state.plansByDate.get(dateKey);
+            if (state.planResultDate === dateKey && latestPlan) {
+              renderPlanResult(latestPlan, dateKey);
+            }
+            renderTaskBoard(dateKey);
+            showOutput(optimized);
+            showToast("已优化当前任务描述");
+            return;
+          }
+
           const data = await postJson("/api/plan/item/regenerate", {
             date: dateKey,
             item_index: itemIndex,
             action,
+            source_item: built.item,
           });
           const savedDate = ensureDate(data.date || dateKey);
           state.plansByDate.set(savedDate, data);
@@ -1143,11 +1282,12 @@ function wireTaskBoardEvents(dateKey) {
           }
           renderTaskBoard(savedDate);
           showOutput(data);
-          showToast(action === "split" ? "已完成任务细化" : "已优化任务描述");
+          showToast("已完成任务细化");
         } catch (err) {
           showOutput({ error: String(err) });
           showToast(`AI处理失败：${String(err)}`, { error: true });
         } finally {
+          setCardOptimizing(false);
           button.disabled = false;
           button.textContent = originalText || "处理中";
         }

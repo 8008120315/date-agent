@@ -2,9 +2,10 @@ from pathlib import Path
 from datetime import datetime
 from uuid import uuid4
 import re
+import json
 
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -32,12 +33,16 @@ from .schemas import (
     MemoryWriteResponse,
     PlanDraftAssignRequest,
     PlanDraftAssignResponse,
+    PlanDraftEnrichRequest,
+    PlanDraftEnrichResponse,
     PlanDraftGenerateRequest,
     PlanDraftGenerateResponse,
     PlanDayCommitRequest,
     PlanItemCreateRequest,
     PlanItemDeleteRequest,
     PlanItemMoveResponse,
+    PlanItemOptimizeRequest,
+    PlanItemOptimizeResponse,
     PlanItemRegenerateRequest,
     PlanItemProgressUpdateRequest,
     PlanItemRescheduleRequest,
@@ -189,6 +194,37 @@ def generate_plan_draft_pool(payload: PlanDraftGenerateRequest) -> PlanDraftGene
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@app.post("/api/plan/draft/generate/stream")
+def generate_plan_draft_pool_stream(payload: PlanDraftGenerateRequest) -> StreamingResponse:
+    def sse(event: str, data: dict) -> str:
+        return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+    def event_stream():
+        try:
+            for event_name, data in plan_service.generate_draft_pool_stream(payload):
+                yield sse(event_name, data)
+        except Exception as exc:
+            yield sse("error", {"message": str(exc)})
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@app.post("/api/plan/draft/item/enrich", response_model=PlanDraftEnrichResponse)
+def enrich_plan_draft_item(payload: PlanDraftEnrichRequest) -> PlanDraftEnrichResponse:
+    try:
+        return plan_service.enrich_draft_task(payload)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.post("/api/plan/draft/assign", response_model=PlanDraftAssignResponse)
 def assign_plan_draft_tasks(payload: PlanDraftAssignRequest) -> PlanDraftAssignResponse:
     try:
@@ -232,6 +268,16 @@ def commit_plan_day(payload: PlanDayCommitRequest) -> PlanResponse:
 def regenerate_plan_item(payload: PlanItemRegenerateRequest) -> PlanResponse:
     try:
         return plan_service.regenerate_plan_item(payload)
+    except RuntimeError as exc:
+        detail = str(exc)
+        status = 404 if "No daily plan found" in detail else 400
+        raise HTTPException(status_code=status, detail=detail) from exc
+
+
+@app.post("/api/plan/item/optimize", response_model=PlanItemOptimizeResponse)
+def optimize_plan_item(payload: PlanItemOptimizeRequest) -> PlanItemOptimizeResponse:
+    try:
+        return plan_service.optimize_plan_item(payload)
     except RuntimeError as exc:
         detail = str(exc)
         status = 404 if "No daily plan found" in detail else 400

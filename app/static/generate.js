@@ -3,12 +3,24 @@ const draftState = {
   selectedTaskIds: new Set(),
   expandedTaskIds: new Set(),
   removingTaskIds: new Set(),
+  enrichingTaskIds: new Set(),
   targetDate: "",
   goalText: "",
+  isGenerating: false,
+  streamAbortController: null,
+  loadingHintTimer: null,
+  loadingHintIndex: 0,
   existingTasksByDate: new Map(),
   freshTaskIndicesByDate: new Map(),
   freshTimersByDate: new Map(),
 };
+
+const GENERATE_HINTS = [
+  "正在理解您的目标...",
+  "正在调用专家经验拆解步骤...",
+  "正在评估任务耗时与优先级...",
+  "即将完成...",
+];
 
 function escapeHtml(value) {
   return String(value)
@@ -145,6 +157,90 @@ function setGenerateStatus(message, { error = false } = {}) {
   el.classList.toggle("is-error", error);
 }
 
+function startGenerateHintRotation() {
+  if (draftState.loadingHintTimer) {
+    clearInterval(draftState.loadingHintTimer);
+  }
+  draftState.loadingHintIndex = 0;
+  setGenerateStatus(GENERATE_HINTS[0]);
+  draftState.loadingHintTimer = setInterval(() => {
+    if (!draftState.isGenerating) return;
+    draftState.loadingHintIndex = (draftState.loadingHintIndex + 1) % GENERATE_HINTS.length;
+    setGenerateStatus(GENERATE_HINTS[draftState.loadingHintIndex]);
+  }, 2000);
+}
+
+function stopGenerateHintRotation() {
+  if (draftState.loadingHintTimer) {
+    clearInterval(draftState.loadingHintTimer);
+    draftState.loadingHintTimer = null;
+  }
+}
+
+async function consumeSSE(url, payload, handlers = {}) {
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "text/event-stream",
+    },
+    body: JSON.stringify(payload),
+    signal: draftState.streamAbortController?.signal,
+  });
+  if (!response.ok) {
+    throw new Error(await readErrorMessage(response));
+  }
+  if (!response.body) {
+    throw new Error("浏览器不支持流式读取");
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder("utf-8");
+  let buffer = "";
+
+  const dispatchEvent = (eventName, rawData) => {
+    let data = rawData;
+    if (typeof rawData === "string" && rawData.trim()) {
+      try {
+        data = JSON.parse(rawData);
+      } catch {
+        data = { message: rawData };
+      }
+    }
+    if (handlers.onEvent) {
+      handlers.onEvent(eventName, data);
+    }
+  };
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+
+    let boundaryIndex = buffer.indexOf("\n\n");
+    while (boundaryIndex !== -1) {
+      const block = buffer.slice(0, boundaryIndex).trim();
+      buffer = buffer.slice(boundaryIndex + 2);
+      boundaryIndex = buffer.indexOf("\n\n");
+      if (!block) continue;
+
+      let eventName = "message";
+      const dataLines = [];
+      block.split(/\r?\n/).forEach((line) => {
+        if (!line || line.startsWith(":")) return;
+        if (line.startsWith("event:")) {
+          eventName = line.slice(6).trim() || "message";
+          return;
+        }
+        if (line.startsWith("data:")) {
+          dataLines.push(line.slice(5).trimStart());
+        }
+      });
+      dispatchEvent(eventName, dataLines.join("\n"));
+    }
+  }
+}
+
 function setDateLoadStatus(message, { error = false } = {}) {
   const el = document.getElementById("draft-date-load-status");
   if (!el) return;
@@ -240,6 +336,12 @@ function markFreshTasks(dateKey, allTasks, appendedTasks) {
 function renderInboxMeta() {
   const meta = document.getElementById("draft-inbox-meta");
   if (!meta) return;
+  if (draftState.isGenerating) {
+    meta.textContent = draftState.draftTasks.length
+      ? `已流式生成 ${draftState.draftTasks.length} 条草稿任务，仍在继续...`
+      : "正在流式生成任务草稿，任务将逐条出现。";
+    return;
+  }
   if (!draftState.draftTasks.length) {
     meta.textContent = "当前任务池为空，输入目标后生成任务草稿。";
     return;
@@ -252,6 +354,27 @@ function renderDraftPool() {
   const list = document.getElementById("draft-pool-list");
   if (!list) return;
   if (!draftState.draftTasks.length) {
+    if (draftState.isGenerating) {
+      list.innerHTML = `
+        <div class="draft-skeleton-list" aria-live="polite" aria-busy="true">
+          ${new Array(4)
+            .fill(0)
+            .map(
+              () => `
+            <article class="draft-skeleton-card">
+              <div class="draft-skeleton-line w-60"></div>
+              <div class="draft-skeleton-line w-30"></div>
+              <div class="draft-skeleton-line w-90"></div>
+            </article>
+          `,
+            )
+            .join("")}
+        </div>
+      `;
+      renderInboxMeta();
+      updateAssignSummary();
+      return;
+    }
     list.innerHTML = `
       <div class="draft-empty-state">
         <p>暂无草稿任务</p>
@@ -268,6 +391,7 @@ function renderDraftPool() {
       const checked = draftState.selectedTaskIds.has(task.draft_id);
       const removing = draftState.removingTaskIds.has(task.draft_id);
       const expanded = draftState.expandedTaskIds.has(task.draft_id);
+      const enriching = draftState.enrichingTaskIds.has(task.draft_id);
       const estimate = task.estimate_hours ? `${task.estimate_hours} h` : "未估时";
       const checklist = Array.isArray(task.checklist) ? task.checklist : [];
       const checklistHtml = checklist.length
@@ -281,10 +405,22 @@ function renderDraftPool() {
           `,
             )
             .join("")
-        : `<li class="hint">暂无子任务</li>`;
+        : `<li class="hint">暂无子任务，展开后将按需补全。</li>`;
+
+      const collapseBody = enriching
+        ? `
+          <div class="draft-enriching-state">
+            <span class="draft-enrich-dot"></span>
+            <span class="hint">正在为该任务生成子任务...</span>
+          </div>
+        `
+        : `
+          <p class="draft-task-desc">${escapeHtml(task.done_definition || "有明确可验证产出")}</p>
+          <ul class="draft-subtasks">${checklistHtml}</ul>
+        `;
 
       return `
-        <article class="draft-task-card ${removing ? "is-removing" : ""}" data-draft-id="${escapeHtml(task.draft_id)}">
+        <article class="draft-task-card ${removing ? "is-removing" : ""} ${enriching ? "is-enriching" : ""}" data-draft-id="${escapeHtml(task.draft_id)}">
           <div class="draft-task-head">
             <label class="draft-task-check">
               <input data-role="draft-select" type="checkbox" value="${escapeHtml(task.draft_id)}" ${checked ? "checked" : ""} ${
@@ -303,8 +439,7 @@ function renderDraftPool() {
             </button>
           </div>
           <div class="draft-task-collapse ${expanded ? "is-open" : ""}">
-            <p class="draft-task-desc">${escapeHtml(task.done_definition || "有明确可验证产出")}</p>
-            <ul class="draft-subtasks">${checklistHtml}</ul>
+            ${collapseBody}
           </div>
         </article>
       `;
@@ -434,6 +569,20 @@ function bindGeneratePage() {
   renderExistingTasksBoard();
   void loadExistingTasksForTargetDate();
 
+  const setGeneratingState = (isGenerating) => {
+    draftState.isGenerating = Boolean(isGenerating);
+    if (generateBtn) {
+      generateBtn.disabled = draftState.isGenerating;
+      generateBtn.textContent = draftState.isGenerating ? "生成中..." : "生成任务草稿池";
+    }
+    if (draftState.isGenerating) {
+      startGenerateHintRotation();
+    } else {
+      stopGenerateHintRotation();
+    }
+    renderInboxMeta();
+  };
+
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
     const goalText = String(goalInput?.value || "").trim();
@@ -443,24 +592,72 @@ function bindGeneratePage() {
       return;
     }
 
-    generateBtn.disabled = true;
-    generateBtn.textContent = "生成中...";
-    setGenerateStatus("AI 正在拆解目标并生成任务草稿池...");
+    if (draftState.streamAbortController) {
+      draftState.streamAbortController.abort();
+      draftState.streamAbortController = null;
+    }
+
+    draftState.goalText = goalText;
+    draftState.draftTasks = [];
+    draftState.selectedTaskIds.clear();
+    draftState.expandedTaskIds.clear();
+    draftState.removingTaskIds.clear();
+    draftState.enrichingTaskIds.clear();
+    renderDraftPool();
+    renderExistingTasksBoard();
+    setGeneratingState(true);
+
+    draftState.streamAbortController = new AbortController();
+    let completePayload = null;
+    let streamErrorMessage = "";
+    let firstTaskReceived = false;
 
     try {
-      const data = await postJson("/api/plan/draft/generate", {
+      await consumeSSE("/api/plan/draft/generate/stream", {
         goal_text: goalText,
+      }, {
+        onEvent: (eventName, data) => {
+          if (eventName === "start") {
+            if (!firstTaskReceived && data?.message) {
+              setGenerateStatus(String(data.message));
+            }
+            return;
+          }
+          if (eventName === "status") {
+            if (firstTaskReceived && data?.message) {
+              setGenerateStatus(String(data.message));
+            }
+            return;
+          }
+          if (eventName === "task" && data?.task) {
+            if (!firstTaskReceived) {
+              firstTaskReceived = true;
+              stopGenerateHintRotation();
+            }
+            const normalized = normalizeTask(data.task);
+            if (!normalized.draft_id) return;
+            if (draftState.draftTasks.some((task) => task.draft_id === normalized.draft_id)) return;
+            draftState.draftTasks.push(normalized);
+            renderDraftPool();
+            renderExistingTasksBoard();
+            const index = Number(data.index || draftState.draftTasks.length);
+            const total = Number(data.total || 0);
+            setGenerateStatus(total > 0 ? `已生成 ${index}/${total} 条草稿任务` : `已生成 ${index} 条草稿任务`);
+            return;
+          }
+          if (eventName === "complete") {
+            completePayload = data || {};
+            return;
+          }
+          if (eventName === "error") {
+            streamErrorMessage = String(data?.message || "生成失败");
+          }
+        },
       });
-      console.log("[draft generate]", data);
-      draftState.goalText = goalText;
-      draftState.draftTasks = (Array.isArray(data.draft_tasks) ? data.draft_tasks : []).map(normalizeTask);
-      draftState.selectedTaskIds.clear();
-      draftState.expandedTaskIds.clear();
-      draftState.removingTaskIds.clear();
-
-      renderDraftPool();
-      renderExistingTasksBoard();
-      const spanDays = Number(data.inferred_span_days || 0);
+      if (streamErrorMessage) {
+        throw new Error(streamErrorMessage);
+      }
+      const spanDays = Number(completePayload?.inferred_span_days || 0);
       const spanTip = spanDays > 0 ? `（推断周期约 ${spanDays} 天）` : "";
       setGenerateStatus(`已生成 ${draftState.draftTasks.length} 条草稿任务 ${spanTip}`.trim());
       showToast(`草稿池已生成（${draftState.draftTasks.length} 条）`);
@@ -468,8 +665,8 @@ function bindGeneratePage() {
       setGenerateStatus(`生成失败：${String(err)}`, { error: true });
       showToast(`生成失败：${String(err)}`, { error: true });
     } finally {
-      generateBtn.disabled = false;
-      generateBtn.textContent = "生成任务草稿池";
+      draftState.streamAbortController = null;
+      setGeneratingState(false);
     }
   });
 
@@ -535,6 +732,34 @@ function bindGeneratePage() {
       draftState.expandedTaskIds.delete(draftId);
     } else {
       draftState.expandedTaskIds.add(draftId);
+      const currentTask = draftState.draftTasks.find((task) => task.draft_id === draftId);
+      const hasChecklist = Array.isArray(currentTask?.checklist) && currentTask.checklist.length > 0;
+      const isEnriching = draftState.enrichingTaskIds.has(draftId);
+      if (currentTask && !hasChecklist && !isEnriching) {
+        draftState.enrichingTaskIds.add(draftId);
+        renderDraftPool();
+        void postJson("/api/plan/draft/item/enrich", {
+          goal_text: draftState.goalText,
+          task: currentTask,
+        })
+          .then((data) => {
+            const incoming = normalizeTask(data?.task || {});
+            if (!incoming.draft_id) return;
+            const idx = draftState.draftTasks.findIndex((task) => task.draft_id === incoming.draft_id);
+            if (idx < 0) return;
+            draftState.draftTasks[idx] = {
+              ...draftState.draftTasks[idx],
+              ...incoming,
+            };
+          })
+          .catch((err) => {
+            showToast(`补全子任务失败：${String(err)}`, { error: true });
+          })
+          .finally(() => {
+            draftState.enrichingTaskIds.delete(draftId);
+            renderDraftPool();
+          });
+      }
     }
     renderDraftPool();
   });
