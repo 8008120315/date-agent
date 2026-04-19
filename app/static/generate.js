@@ -3,7 +3,6 @@ const draftState = {
   selectedTaskIds: new Set(),
   expandedTaskIds: new Set(),
   removingTaskIds: new Set(),
-  rangeDates: [],
   targetDate: "",
   goalText: "",
   existingTasksByDate: new Map(),
@@ -38,19 +37,13 @@ function addDays(dateObj, delta) {
   return d;
 }
 
-function enumerateDateRange(startDateKey, endDateKey) {
-  const start = parseDateKey(startDateKey);
-  const end = parseDateKey(endDateKey);
-  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || start > end) {
-    return [];
-  }
-  const rows = [];
-  let cursor = new Date(start.getFullYear(), start.getMonth(), start.getDate());
-  while (cursor <= end && rows.length < 90) {
-    rows.push(toDateKey(cursor));
-    cursor = addDays(cursor, 1);
-  }
-  return rows;
+function todayDateKey() {
+  return toDateKey(new Date());
+}
+
+function isPastDate(dateKey) {
+  if (!dateKey) return false;
+  return dateKey < todayDateKey();
 }
 
 function normalizeHours(value) {
@@ -155,7 +148,9 @@ function setGenerateStatus(message, { error = false } = {}) {
 function setDateLoadStatus(message, { error = false } = {}) {
   const el = document.getElementById("draft-date-load-status");
   if (!el) return;
-  el.textContent = message;
+  const text = String(message || "").trim();
+  el.textContent = text;
+  el.hidden = !text;
   el.classList.toggle("is-error", error);
 }
 
@@ -187,9 +182,23 @@ function updateAssignSummary() {
   }
   if (assignBtn) {
     assignBtn.textContent = `将勾选的 ${selected} 个任务加入该日期`;
-    assignBtn.disabled = selected === 0 || !draftState.targetDate;
+    assignBtn.disabled = selected === 0 || !draftState.targetDate || isPastDate(draftState.targetDate);
   }
   updateSelectToggleButton();
+}
+
+function updateQuickDateButtons() {
+  const buttons = Array.from(document.querySelectorAll(".draft-quick-date-btn"));
+  const today = parseDateKey(todayDateKey());
+  const target = parseDateKey(draftState.targetDate);
+  const diffDays = Number.isNaN(target.getTime())
+    ? null
+    : Math.round((target.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
+
+  buttons.forEach((btn) => {
+    const offset = Number(btn.getAttribute("data-offset") || 0);
+    btn.classList.toggle("is-active", diffDays === offset);
+  });
 }
 
 function taskKey(task) {
@@ -228,30 +237,11 @@ function markFreshTasks(dateKey, allTasks, appendedTasks) {
   draftState.freshTimersByDate.set(dateKey, timer);
 }
 
-function renderTargetDateOptions() {
-  const select = document.getElementById("draft-target-date-select");
-  if (!select) return;
-  select.innerHTML = draftState.rangeDates
-    .map((dateKey) => `<option value="${escapeHtml(dateKey)}">${escapeHtml(dateKey)}</option>`)
-    .join("");
-  if (!draftState.rangeDates.length) {
-    draftState.targetDate = "";
-    select.disabled = true;
-    select.innerHTML = `<option value="">请先生成草稿</option>`;
-  } else {
-    if (!draftState.rangeDates.includes(draftState.targetDate)) {
-      draftState.targetDate = draftState.rangeDates[0];
-    }
-    select.value = draftState.targetDate;
-    select.disabled = false;
-  }
-}
-
 function renderInboxMeta() {
   const meta = document.getElementById("draft-inbox-meta");
   if (!meta) return;
   if (!draftState.draftTasks.length) {
-    meta.textContent = "当前任务池为空，先生成草稿任务或重新生成。";
+    meta.textContent = "当前任务池为空，输入目标后生成任务草稿。";
     return;
   }
   const selected = countSelectedDrafts();
@@ -333,7 +323,12 @@ function renderExistingTasksBoard() {
   const dateKey = draftState.targetDate;
   const tasks = draftState.existingTasksByDate.get(dateKey) || [];
   const totalHours = tasks.reduce((sum, task) => sum + (normalizeHours(task.estimate_hours) || 0), 0);
-  summary.textContent = `该日已有任务：${tasks.length} 个 | 预计总耗时：${Number(totalHours.toFixed(1))} h`;
+  const roundedHours = Number(totalHours.toFixed(1));
+  const overloadClass = roundedHours >= 8 ? " is-overload" : "";
+  summary.innerHTML = `
+    <span class="draft-load-count">该日已有任务：${tasks.length} 个</span>
+    <span class="draft-load-hours${overloadClass}">预计总耗时：${roundedHours} h</span>
+  `;
 
   if (!tasks.length) {
     list.innerHTML = `
@@ -371,26 +366,23 @@ async function fetchTasksByDate(dateKey) {
 
 async function loadExistingTasksForTargetDate() {
   if (!draftState.targetDate) {
-    setDateLoadStatus("请选择目标日期以查看当日任务负载。");
+    setDateLoadStatus("");
     renderExistingTasksBoard();
     return;
   }
-  setDateLoadStatus("正在加载该日期已有任务...");
+  if (isPastDate(draftState.targetDate)) {
+    setDateLoadStatus("目标日期不能早于今天。", { error: true });
+    renderExistingTasksBoard();
+    return;
+  }
   try {
     await fetchTasksByDate(draftState.targetDate);
     renderExistingTasksBoard();
-    setDateLoadStatus("已加载该日期任务负载。");
+    setDateLoadStatus("");
   } catch (err) {
     setDateLoadStatus(`加载失败：${String(err)}`, { error: true });
     renderExistingTasksBoard();
   }
-}
-
-function applyRangeToInputs(startDate, endDate) {
-  const startInput = document.getElementById("draft-start-date");
-  const endInput = document.getElementById("draft-end-date");
-  if (startInput) startInput.value = startDate;
-  if (endInput) endInput.value = endDate;
 }
 
 async function removeAssignedDraftsWithAnimation(draftIds) {
@@ -407,41 +399,45 @@ async function removeAssignedDraftsWithAnimation(draftIds) {
   renderDraftPool();
 }
 
+function applyQuickDateSelection(targetInput, offset) {
+  const base = new Date();
+  const target = toDateKey(addDays(base, Number(offset || 0)));
+  targetInput.value = target;
+  draftState.targetDate = target;
+  updateAssignSummary();
+  updateQuickDateButtons();
+  renderExistingTasksBoard();
+  void loadExistingTasksForTargetDate();
+}
+
 function bindGeneratePage() {
   const form = document.getElementById("draft-plan-form");
   if (!form) return;
 
-  const startInput = document.getElementById("draft-start-date");
-  const endInput = document.getElementById("draft-end-date");
   const goalInput = document.getElementById("draft-goal-text");
   const generateBtn = document.getElementById("draft-generate-btn");
-  const targetDateSelect = document.getElementById("draft-target-date-select");
+  const targetDateInput = document.getElementById("draft-target-date-input");
+  const quickDateButtons = Array.from(document.querySelectorAll(".draft-quick-date-btn"));
   const toggleSelectBtn = document.getElementById("draft-toggle-select-btn");
   const clearDraftBtn = document.getElementById("draft-clear-btn");
   const assignBtn = document.getElementById("draft-assign-btn");
   const poolList = document.getElementById("draft-pool-list");
 
-  const today = toDateKey(new Date());
-  const defaultEnd = toDateKey(addDays(new Date(), 2));
-  applyRangeToInputs(today, defaultEnd);
-  draftState.rangeDates = enumerateDateRange(today, defaultEnd);
-  draftState.targetDate = draftState.rangeDates[0] || "";
-  renderTargetDateOptions();
+  if (!(targetDateInput instanceof HTMLInputElement)) return;
+
+  const today = todayDateKey();
+  targetDateInput.min = today;
+  targetDateInput.value = today;
+  draftState.targetDate = today;
+  updateQuickDateButtons();
   renderDraftPool();
   renderExistingTasksBoard();
   void loadExistingTasksForTargetDate();
 
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
-    const startDate = String(startInput?.value || "").trim();
-    const endDate = String(endInput?.value || "").trim();
     const goalText = String(goalInput?.value || "").trim();
 
-    const rangeDates = enumerateDateRange(startDate, endDate);
-    if (!rangeDates.length) {
-      setGenerateStatus("日期范围无效，请重新选择。", { error: true });
-      return;
-    }
     if (!goalText) {
       setGenerateStatus("请先输入目标。", { error: true });
       return;
@@ -449,12 +445,10 @@ function bindGeneratePage() {
 
     generateBtn.disabled = true;
     generateBtn.textContent = "生成中...";
-    setGenerateStatus("AI 正在生成多日任务草稿池...");
+    setGenerateStatus("AI 正在拆解目标并生成任务草稿池...");
 
     try {
       const data = await postJson("/api/plan/draft/generate", {
-        start_date: startDate,
-        end_date: endDate,
         goal_text: goalText,
       });
       console.log("[draft generate]", data);
@@ -463,17 +457,12 @@ function bindGeneratePage() {
       draftState.selectedTaskIds.clear();
       draftState.expandedTaskIds.clear();
       draftState.removingTaskIds.clear();
-      draftState.rangeDates = enumerateDateRange(
-        String(data.start_date || startDate),
-        String(data.end_date || endDate),
-      );
-      draftState.targetDate = draftState.rangeDates[0] || "";
 
-      renderTargetDateOptions();
       renderDraftPool();
       renderExistingTasksBoard();
-      void loadExistingTasksForTargetDate();
-      setGenerateStatus(`已生成 ${draftState.draftTasks.length} 条草稿任务，可手动分配到目标日期。`);
+      const spanDays = Number(data.inferred_span_days || 0);
+      const spanTip = spanDays > 0 ? `（推断周期约 ${spanDays} 天）` : "";
+      setGenerateStatus(`已生成 ${draftState.draftTasks.length} 条草稿任务 ${spanTip}`.trim());
       showToast(`草稿池已生成（${draftState.draftTasks.length} 条）`);
     } catch (err) {
       setGenerateStatus(`生成失败：${String(err)}`, { error: true });
@@ -484,11 +473,38 @@ function bindGeneratePage() {
     }
   });
 
-  targetDateSelect?.addEventListener("change", async () => {
-    draftState.targetDate = String(targetDateSelect.value || "").trim();
+  targetDateInput.addEventListener("change", async () => {
+    const nextDate = String(targetDateInput.value || "").trim();
+    if (!nextDate) {
+      draftState.targetDate = "";
+      updateAssignSummary();
+      updateQuickDateButtons();
+      renderExistingTasksBoard();
+      setDateLoadStatus("");
+      return;
+    }
+    if (isPastDate(nextDate)) {
+      targetDateInput.value = todayDateKey();
+      draftState.targetDate = targetDateInput.value;
+      updateAssignSummary();
+      updateQuickDateButtons();
+      renderExistingTasksBoard();
+      setDateLoadStatus("目标日期不能早于今天。", { error: true });
+      showToast("只能分配到今天及未来日期", { error: true });
+      return;
+    }
+    draftState.targetDate = nextDate;
     updateAssignSummary();
+    updateQuickDateButtons();
     renderExistingTasksBoard();
     await loadExistingTasksForTargetDate();
+  });
+
+  quickDateButtons.forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const offset = Number(btn.getAttribute("data-offset") || 0);
+      applyQuickDateSelection(targetDateInput, offset);
+    });
   });
 
   poolList?.addEventListener("change", (event) => {
@@ -557,6 +573,10 @@ function bindGeneratePage() {
       showToast("请先选择目标日期", { error: true });
       return;
     }
+    if (isPastDate(draftState.targetDate)) {
+      showToast("只能分配到今天及未来日期", { error: true });
+      return;
+    }
     const selectedTasks = draftState.draftTasks.filter((task) => selectedIds.includes(task.draft_id));
     if (!selectedTasks.length) {
       showToast("已选任务不存在，请重新勾选", { error: true });
@@ -577,7 +597,7 @@ function bindGeneratePage() {
       draftState.existingTasksByDate.set(draftState.targetDate, planItems);
       markFreshTasks(draftState.targetDate, planItems, selectedTasks);
       renderExistingTasksBoard();
-      setDateLoadStatus("该日期任务已更新。");
+      setDateLoadStatus("");
 
       await removeAssignedDraftsWithAnimation(selectedIds);
       showToast(`已成功将 ${selectedTasks.length} 个任务分配至 ${draftState.targetDate} 日程中`);

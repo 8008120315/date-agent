@@ -246,24 +246,19 @@ class PlanService:
         return self.get_plan(req.date)
 
     def generate_draft_pool(self, req: PlanDraftGenerateRequest) -> PlanDraftGenerateResponse:
-        if req.end_date < req.start_date:
-            raise RuntimeError("end_date must be greater than or equal to start_date.")
-        span_days = (req.end_date - req.start_date).days + 1
-        if span_days > 90:
-            raise RuntimeError("date range cannot exceed 90 days.")
-
+        reference_date = date.today()
+        span_days = self._infer_draft_span_days(req.goal_text)
         memory_refs = self._collect_memory_refs(req.goal_text)
-        fixed_refs = self._collect_fixed_schedule_refs(req.start_date)
+        fixed_refs = self._collect_fixed_schedule_refs(reference_date)
         for cursor in range(1, min(span_days, 7)):
-            date_cursor = req.start_date.fromordinal(req.start_date.toordinal() + cursor)
+            date_cursor = reference_date.fromordinal(reference_date.toordinal() + cursor)
             for row in self._collect_fixed_schedule_refs(date_cursor):
                 if row not in fixed_refs:
                     fixed_refs.append(row)
 
         tasks, note, source_model, fallback = self._generate_draft_tasks(
             goal_text=req.goal_text,
-            start_date=req.start_date,
-            end_date=req.end_date,
+            reference_date=reference_date,
             span_days=span_days,
             memory_refs=memory_refs,
             fixed_schedule_refs=fixed_refs[:12],
@@ -273,9 +268,8 @@ class PlanService:
             PlanDraftTask(draft_id=f"draft-{uuid4().hex[:12]}", **task.model_dump()) for task in tasks
         ]
         return PlanDraftGenerateResponse(
-            start_date=req.start_date,
-            end_date=req.end_date,
-            span_days=span_days,
+            reference_date=reference_date,
+            inferred_span_days=span_days,
             goal_text=req.goal_text,
             draft_tasks=draft_tasks,
             source_model=source_model,
@@ -284,6 +278,9 @@ class PlanService:
         )
 
     def assign_draft_tasks(self, req: PlanDraftAssignRequest) -> PlanDraftAssignResponse:
+        if req.target_date < date.today():
+            raise RuntimeError("target_date cannot be in the past. Please choose today or a future date.")
+
         payload = self._load_daily_plan_payload(req.target_date)
         if payload is None:
             payload = self._build_empty_plan_payload(
@@ -691,8 +688,7 @@ class PlanService:
         self,
         *,
         goal_text: str,
-        start_date: date,
-        end_date: date,
+        reference_date: date,
         span_days: int,
         memory_refs: list[str],
         fixed_schedule_refs: list[str],
@@ -722,12 +718,15 @@ class PlanService:
             "3) Every task needs 2-5 executable checklist steps.\n"
             "4) Avoid specific time-slot words like morning/afternoon/evening.\n"
             "5) Priorities should be balanced across P0/P1/P2.\n"
+            "6) User may provide natural-language duration like '2周/3天/一个月'; align workload roughly to it.\n"
+            "7) Hidden context: today is provided by the system; use it only for pacing, do not expose it in output.\n"
         )
         memory_block = "\n".join(f"- {item}" for item in memory_refs) or "- N/A"
         fixed_schedule_block = "\n".join(f"- {item}" for item in fixed_schedule_refs) or "- N/A"
         local_context_block = build_local_context_block(self.settings)
         user_prompt = (
-            f"Date range: {start_date.isoformat()} to {end_date.isoformat()} ({span_days} days)\n"
+            f"[System hidden variable] Today is {reference_date.isoformat()}\n"
+            f"Inferred workload horizon: about {span_days} days\n"
             f"Goal: {goal_text}\n"
             "Local context:\n"
             f"{local_context_block}\n"
@@ -803,6 +802,54 @@ class PlanService:
                 )
             round_index += 1
         return self._sort_plan_items(tasks)
+
+    def _infer_draft_span_days(self, goal_text: str) -> int:
+        text = str(goal_text or "").strip().lower()
+        if not text:
+            return 7
+
+        arabic_patterns: list[tuple[str, int]] = [
+            (r"(\d{1,2})\s*(?:周|星期|weeks?|week)", 7),
+            (r"(\d{1,2})\s*(?:天|日|days?|day)", 1),
+            (r"(\d{1,2})\s*(?:个?\s*月|months?|month)", 30),
+        ]
+        for pattern, factor in arabic_patterns:
+            match = re.search(pattern, text, flags=re.IGNORECASE)
+            if match:
+                value = int(match.group(1))
+                return max(1, min(90, value * factor))
+
+        cn_digit = {
+            "一": 1,
+            "二": 2,
+            "两": 2,
+            "三": 3,
+            "四": 4,
+            "五": 5,
+            "六": 6,
+            "七": 7,
+            "八": 8,
+            "九": 9,
+            "十": 10,
+        }
+        cn_match = re.search(r"(一|二|两|三|四|五|六|七|八|九|十)\s*(?:个)?\s*(周|星期|天|日|月)", text)
+        if cn_match:
+            count = cn_digit.get(cn_match.group(1), 1)
+            unit = cn_match.group(2)
+            if unit in {"周", "星期"}:
+                return max(1, min(90, count * 7))
+            if unit in {"月"}:
+                return max(1, min(90, count * 30))
+            return max(1, min(90, count))
+
+        if "半个月" in text:
+            return 15
+        if "这周" in text or "本周" in text:
+            return 7
+        if "本月" in text or "这个月" in text:
+            return 30
+
+        return 7
 
     def _parse_plan_reply(self, raw_reply: str) -> tuple[list[PlanItem], str]:
         payload = self._extract_json_object(raw_reply)

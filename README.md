@@ -152,10 +152,9 @@ From `.env.example`:
 
 ### 4.1 Generate Task Draft Pool
 
-- Select `start_date` + `end_date`
-- Enter `goal_text`
+- Enter one `goal_text` (can include natural-language duration like "2周/3天/1个月")
 - AI returns draft tasks
-- Select tasks and assign to a target date
+- Select tasks and assign to a target date (today or future only)
 
 ### 4.2 Daily Task Board
 
@@ -243,7 +242,7 @@ Generate draft pool:
 ```bash
 curl -X POST "http://127.0.0.1:8000/api/plan/draft/generate" \
   -H "Content-Type: application/json" \
-  -d "{\"start_date\":\"2026-04-19\",\"end_date\":\"2026-04-21\",\"goal_text\":\"Prepare backend interview\"}"
+  -d "{\"goal_text\":\"Prepare backend interview in around 2 weeks\"}"
 ```
 
 Assign selected tasks to one date:

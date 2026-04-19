@@ -27,28 +27,23 @@
         </nav>
       </section>
 
-      <section class="card">
+      <section class="card draft-ideation-card">
         <h2>生成任务草稿池</h2>
         <form id="draft-plan-form" class="draft-plan-form">
-          <div class="draft-range-row">
-            <label>
-              开始日期
-              <input id="draft-start-date" name="start_date" type="date" required />
-            </label>
-            <span class="draft-range-sep">至</span>
-            <label>
-              结束日期
-              <input id="draft-end-date" name="end_date" type="date" required />
-            </label>
-          </div>
-          <label>
+          <label class="draft-goal-label">
             目标
-            <input id="draft-goal-text" name="goal_text" type="text" required placeholder="例如：准备 Java 后端实习面试" />
+            <textarea
+              id="draft-goal-text"
+              name="goal_text"
+              rows="3"
+              required
+              placeholder="例如：准备 Java 后端实习面试，大概需要花 2 周时间复习；或：重构项目首页，预计耗时 3 天。"
+            ></textarea>
           </label>
-          <p class="hint">AI 将根据您选择的日期跨度，生成一份总体的任务清单草稿。</p>
+          <p class="hint draft-helper-text">输入您的目标或大致时间预期，AI 将为您拆解为结构化的任务草稿清单。</p>
           <div class="draft-form-actions">
-            <button id="draft-generate-btn" type="submit">生成任务草稿池</button>
             <span id="draft-generate-status" class="hint"></span>
+            <button id="draft-generate-btn" type="submit">生成任务草稿池</button>
           </div>
         </form>
       </section>
@@ -63,7 +58,7 @@
                 <button id="draft-clear-btn" type="button" class="btn-text">清空剩余草稿</button>
               </div>
             </div>
-            <p id="draft-inbox-meta" class="hint">请先选择日期范围并生成草稿任务。</p>
+            <p id="draft-inbox-meta" class="hint">请先输入目标并生成草稿任务。</p>
             <div id="draft-pool-list" class="draft-pool-list"></div>
           </section>
 
@@ -72,9 +67,14 @@
             <div class="draft-dispatch-scroll">
               <label>
                 目标日期
-                <select id="draft-target-date-select"></select>
+                <input id="draft-target-date-input" type="date" />
               </label>
-              <p id="draft-date-load-status" class="hint">请选择目标日期以查看当日任务负载。</p>
+              <div class="draft-quick-date-row" aria-label="快捷日期">
+                <button type="button" class="btn-secondary draft-quick-date-btn" data-offset="0">今天</button>
+                <button type="button" class="btn-secondary draft-quick-date-btn" data-offset="1">明天</button>
+                <button type="button" class="btn-secondary draft-quick-date-btn" data-offset="2">后天</button>
+              </div>
+              <p id="draft-date-load-status" class="hint"></p>
               <div id="draft-load-summary" class="draft-load-summary">该日已有任务：0 个 | 预计总耗时：0 h</div>
               <section class="draft-existing-board">
                 <h4>该日已有正式任务</h4>

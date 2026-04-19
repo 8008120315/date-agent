@@ -67,8 +67,6 @@ class PlanItemRegenerateRequest(BaseModel):
 
 
 class PlanDraftGenerateRequest(BaseModel):
-    start_date: DateType
-    end_date: DateType
     goal_text: str = Field(min_length=1, max_length=500)
 
 
@@ -77,9 +75,8 @@ class PlanDraftTask(PlanItem):
 
 
 class PlanDraftGenerateResponse(BaseModel):
-    start_date: DateType
-    end_date: DateType
-    span_days: int = Field(ge=1, le=90)
+    reference_date: DateType
+    inferred_span_days: int = Field(ge=1, le=90)
     goal_text: str
     draft_tasks: list[PlanDraftTask] = Field(default_factory=list)
     source_model: str = "rule-based"
